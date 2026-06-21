@@ -1136,3 +1136,59 @@ header .subtitle {
 
 /* Smooth reveal for the whole result block */
 #resultState { animation: previewFade 0.5s ease; }
+
+/* ════════════════════════════════════════════════════════ */
+/* Nyx custom icons (cosmic lobster style) 🦞                */
+/* ════════════════════════════════════════════════════════ */
+
+/* Logo image inside the rotating ring */
+.nyx-logo-wrap { overflow: visible; }
+.nyx-logo-img {
+  width: 76%;
+  height: 76%;
+  object-fit: contain;
+  z-index: 1;
+  filter: drop-shadow(0 4px 16px rgba(232,121,168,0.35));
+  animation: lobsterFloat 4s ease-in-out infinite;
+}
+.dl-brand .nyx-logo-img { width: 80%; height: 80%; }
+
+/* File-type icon in the info row */
+.dl-fileicon .nyx-ic {
+  width: 38px; height: 38px; object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 2px 8px rgba(168,85,247,0.25));
+}
+
+/* Icon inside buttons (download / decrypt) */
+.nyx-ic-btn {
+  width: 22px; height: 22px; object-fit: contain;
+  vertical-align: middle;
+  margin-right: 9px;
+  margin-top: -2px;
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.3));
+}
+
+/* Small icon (VirusTotal title) */
+.nyx-ic-sm {
+  width: 20px; height: 20px; object-fit: contain;
+  vertical-align: middle;
+  margin-right: 7px;
+  margin-top: -2px;
+}
+
+/* Tiny footer icon */
+.nyx-ic-tiny {
+  width: 14px; height: 14px; object-fit: contain;
+  vertical-align: middle;
+  margin-right: 5px;
+  margin-top: -2px;
+  opacity: 0.85;
+}
+
+/* No-preview big icon uses the file asset */
+.dl-fileicon.big .nyx-ic { width: 60px; height: 60px; }
+
+/* Header shield icon (admin/index page) */
+.nyx-ic-header { width: 32px; height: 32px; object-fit: contain; display:block; filter: drop-shadow(0 2px 8px rgba(168,85,247,0.3)); }
+.header-shield { display:flex; align-items:center; justify-content:center; }

@@ -5,16 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NyxVault — Secure Download 🔐</title>
   <link rel="stylesheet" href="/style.css?v=__CACHEBUST__">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦞</text></svg>">
+  <link rel="icon" type="image/png" href="/assets/nyx-logo-256.png">
 </head>
 <body>
   <div class="dl-shell">
     <div class="dl-card" id="dlCard">
       <!-- Brand -->
       <div class="dl-brand">
-        <div class="vault-logo">
+        <div class="vault-logo nyx-logo-wrap">
           <div class="vault-logo-ring"></div>
-          <div class="lobster-icon">🦞</div>
+          <img src="/assets/nyx-logo-256.png" alt="Nyx" class="nyx-logo-img">
         </div>
         <h2>NyxVault</h2>
         <p class="dl-tagline">End-to-End Encrypted · Zero Knowledge</p>
@@ -34,7 +34,7 @@
       <!-- File / Decrypt form -->
       <div id="fileState" class="dl-section" style="display:none;">
         <div class="dl-fileinfo">
-          <div class="dl-fileicon" id="dlFileIcon">📄</div>
+          <div class="dl-fileicon" id="dlFileIcon"><img src="/assets/icon-file-128.png" alt="file" class="nyx-ic"></div>
           <div class="dl-filetext">
             <strong id="dlFileName">Encrypted File</strong>
             <span id="dlFileMeta"></span>
@@ -44,7 +44,7 @@
           <div class="input-group">
             <input type="password" id="dlPassphrase" placeholder="Encryption Passphrase" autocomplete="off" required>
           </div>
-          <button type="submit" class="btn-primary" id="dlBtn">🔓 Decrypt</button>
+          <button type="submit" class="btn-primary" id="dlBtn"><img src="/assets/icon-unlock-128.png" alt="" class="nyx-ic-btn">Decrypt</button>
         </form>
         <div class="error-text" id="dlError"></div>
       </div>
@@ -93,14 +93,14 @@
 
         <!-- No-preview placeholder -->
         <div class="dl-nopreview" id="previewNone" style="display:none;">
-          <div class="dl-fileicon big" id="noPreviewIcon">📦</div>
+          <div class="dl-fileicon big"><img src="/assets/icon-file-128.png" alt="file" class="nyx-ic" id="noPreviewIcon"></div>
           <p>No inline preview for this file type</p>
         </div>
 
         <!-- VirusTotal scan -->
         <div class="dl-vt" id="vtBox">
           <div class="dl-vt-head">
-            <span class="dl-vt-title">🛡️ VirusTotal</span>
+            <span class="dl-vt-title"><img src="/assets/icon-shield-128.png" alt="" class="nyx-ic-sm">VirusTotal</span>
             <span class="dl-vt-status" id="vtStatus">Checking…</span>
           </div>
           <div class="dl-vt-body" id="vtBody">
@@ -110,13 +110,13 @@
 
         <!-- Actions -->
         <div class="dl-actions">
-          <button class="btn-primary" id="downloadBtn">⬇️ Download File</button>
+          <button class="btn-primary" id="downloadBtn"><img src="/assets/icon-download-128.png" alt="" class="nyx-ic-btn">Download File</button>
           <button class="btn-ghost-sm" id="copyHashBtn">Copy SHA-256</button>
         </div>
         <p class="dl-hash" id="hashLine"></p>
       </div>
 
-      <p class="vault-footer-mini">🔐 Files are end-to-end encrypted. The server never sees your data.</p>
+      <p class="vault-footer-mini"><img src="/assets/icon-shield-128.png" alt="" class="nyx-ic-tiny">Files are end-to-end encrypted. The server never sees your data.</p>
     </div>
   </div>
 
@@ -335,7 +335,6 @@
     }
   }
   function showNoPreview(ct, name){
-    $('noPreviewIcon').textContent = iconForType(ct, name);
     show('previewNone');
   }
 
