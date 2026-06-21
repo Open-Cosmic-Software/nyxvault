@@ -115,14 +115,16 @@
           <p>No inline preview for this file type</p>
         </div>
 
-        <!-- VirusTotal scan -->
+        <!-- VirusTotal scan (opt-in) -->
         <div class="dl-vt" id="vtBox">
           <div class="dl-vt-head">
             <span class="dl-vt-title"><img src="/assets/icon-shield-128.png" alt="" class="nyx-ic-sm">VirusTotal</span>
-            <span class="dl-vt-status" id="vtStatus">Checking…</span>
+            <span class="dl-vt-status" id="vtStatus">optional</span>
           </div>
           <div class="dl-vt-body" id="vtBody">
-            <span class="spinner small"></span> Looking up file hash…
+            <p class="dl-vt-optin">Check this file against 70+ antivirus engines. Only the <b>SHA-256 hash</b> of the decrypted file is sent to VirusTotal — never the file itself.</p>
+            <p class="dl-vt-note">⚠️ Privacy note: querying the hash reveals to VirusTotal that a file with this exact fingerprint exists. For highly sensitive or unique files, you may prefer to skip this.</p>
+            <button class="btn-ghost-sm dl-vt-btn" id="vtScanBtn"><img src="/assets/icon-shield-128.png" alt="" class="nyx-ic-tiny">Scan with VirusTotal</button>
           </div>
         </div>
 
@@ -332,8 +334,10 @@
           .catch(()=>{});
       }
 
-      // VirusTotal hash lookup (privacy-preserving: only hash leaves the browser)
-      runVirusTotal(decrypted);
+      // Compute the SHA-256 hash LOCALLY (never leaves the browser) so the user
+      // can copy it. The VirusTotal lookup is strictly opt-in via a button —
+      // querying VT reveals the file's existence, so we never do it automatically.
+      prepareHash(decrypted);
     } catch (err) {
       hide('decryptingState'); show('fileState');
       $('dlError').textContent = err.message; $('dlError').style.display = 'block';
@@ -401,16 +405,27 @@
   });
 
   // VirusTotal
-  async function runVirusTotal(bytes) {
+  // Compute + display the hash locally (no network). Wire up Copy + opt-in Scan.
+  let currentHash = null;
+  async function prepareHash(bytes) {
+    currentHash = await sha256Hex(bytes);
+    $('hashLine').textContent = 'SHA-256: ' + currentHash;
+    $('copyHashBtn').onclick = () => {
+      navigator.clipboard.writeText(currentHash).then(()=>toast('Hash copied', 'success'));
+    };
+    const btn = $('vtScanBtn');
+    if (btn) btn.onclick = () => runVirusTotal();
+  }
+
+  async function runVirusTotal() {
+    if (!currentHash) return;
+    const statusEl = $('vtStatus'), bodyEl = $('vtBody'), box = $('vtBox');
+    statusEl.textContent = 'checking…';
+    statusEl.className = 'dl-vt-status neutral';
+    bodyEl.innerHTML = '<span class="spinner small"></span> Looking up file hash…';
     try {
-      const hash = await sha256Hex(bytes);
-      $('hashLine').textContent = 'SHA-256: ' + hash;
-      $('copyHashBtn').onclick = () => {
-        navigator.clipboard.writeText(hash).then(()=>toast('Hash copied', 'success'));
-      };
-      const r = await fetch('/api/vt/' + hash);
+      const r = await fetch('/api/vt/' + currentHash);
       const data = await r.json();
-      const statusEl = $('vtStatus'), bodyEl = $('vtBody'), box = $('vtBox');
 
       if (data.disabled) {
         statusEl.textContent = 'off';

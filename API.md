@@ -90,7 +90,7 @@ Delete a file (DB row + blob). **Auth required.** Response: `{ "ok": true, "dele
 ```
 
 ### `GET /api/vt/:hash`
-**Public.** Privacy-preserving VirusTotal lookup by SHA-256 hex hash (computed client-side from the *decrypted* bytes). Rate-limited, 1h in-memory cache.
+**Public. Opt-in.** VirusTotal lookup by SHA-256 hex hash (computed client-side from the *decrypted* bytes). The web UI never calls this automatically — only on explicit user action — because even a hash query reveals to VirusTotal that a file with that exact fingerprint exists. Integrators should treat it the same way. Rate-limited, 1h in-memory cache.
 Possible responses:
 - `{ "disabled": true }` — no `VT_API_KEY` configured.
 - `{ "not_found": true }` — hash unknown to VirusTotal.

@@ -21,7 +21,7 @@ Encrypt in your browser. Share a link. The server never sees your data.
 - 🖼️ **In-browser preview** — images, video, audio, PDF and text are previewed right after decryption, before you download.
 - 🔥 **Burn after reading** — optional self-destruct: the file is permanently deleted from the server the moment it's first successfully decrypted.
 - ⏳ **Expiring links** — 1 hour, 24 hours, 7 days, 30 days, or never. Expired files are purged automatically.
-- 🛡️ **VirusTotal scan** — optional, privacy-preserving: only the SHA-256 hash of the decrypted file is sent to VirusTotal — never the file itself.
+- 🛡️ **VirusTotal scan (opt-in)** — never runs automatically. The SHA-256 hash is computed client-side and shown to you; only if you click *Scan* is the hash sent to VirusTotal — never the file itself. (Even sending a hash reveals that a file with that exact fingerprint exists, so it's strictly your choice.)
 - ▦ **QR code sharing** — open any download link on your phone by scanning a QR code.
 - 📦 **Large files** — chunked streaming encryption handles big files without eating all your RAM.
 - 🌌 **It looks like Nyx** — a cosmic lobster theme, because why should encryption be boring.
@@ -81,7 +81,7 @@ The server binds to `127.0.0.1` — put a reverse proxy (Caddy, nginx, Traefik) 
 
 ### Download
 
-Anyone with the link opens it, enters the passphrase, and the file is decrypted **in their browser**. They get a preview, a VirusTotal check, and a download button. If the file was set to *burn after reading*, it's destroyed on the server the moment it's decrypted.
+Anyone with the link opens it, enters the passphrase, and the file is decrypted **in their browser**. They get a preview, an optional VirusTotal scan (opt-in, see below), and a download button. If the file was set to *burn after reading*, it's destroyed on the server the moment it's decrypted.
 
 ### CLI
 
@@ -106,7 +106,7 @@ Full CLI and HTTP API reference: **[API.md](API.md)**.
 | **Where** | 100% client-side — browser or CLI. The server receives only ciphertext. |
 | **Filename privacy** | The original filename and content type are themselves encrypted; the server stores `redacted`. |
 | **Passphrase** | Never transmitted. Not stored. Not recoverable. |
-| **VirusTotal** | Only the SHA-256 hash of the *decrypted* bytes is sent — computed client-side. The file is never uploaded to VT. |
+| **VirusTotal** | **Opt-in only** — never automatic. The SHA-256 hash is computed client-side and shown locally; it's sent to VirusTotal only on explicit user click. The file is never uploaded to VT. A clear privacy note warns that even a hash query reveals the file's existence — so users can skip it for sensitive, unique files. |
 | **Burn after reading** | The server only deletes the file after the client confirms a *successful* decryption, so a wrong passphrase can never destroy a file. |
 | **Transport** | Bind to localhost + TLS-terminating reverse proxy. Strict CSP, `X-Frame-Options: DENY`, no inline third-party scripts. |
 | **Rate limiting** | Upload, login and download endpoints are rate-limited against brute force. |
