@@ -1489,3 +1489,89 @@ body.cosmic-bg-img::after {
   background-size: 300% 300%;
   animation: borderFlow 8s ease-in-out infinite;
 }
+
+/* ════════════════════════════════════════════════════════ */
+/* BURN AFTER READING + QR CODE 🔥▦                          */
+/* ════════════════════════════════════════════════════════ */
+
+/* Warning before decrypt */
+.dl-burn-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  text-align: left;
+  background: linear-gradient(135deg, rgba(217,70,239,0.12), rgba(232,121,168,0.08));
+  border: 1px solid rgba(217,70,239,0.35);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  animation: burnPulse 3s ease-in-out infinite;
+}
+.dl-burn-warn .dl-burn-flame {
+  font-size: 1.4rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px rgba(217,70,239,0.6));
+}
+.dl-burn-warn strong { color: #f0a6e0; font-size: 0.92rem; }
+.dl-burn-warn span { color: var(--text-dim); font-size: 0.82rem; line-height: 1.45; }
+@keyframes burnPulse {
+  0%,100% { border-color: rgba(217,70,239,0.30); box-shadow: 0 0 0 rgba(217,70,239,0); }
+  50% { border-color: rgba(217,70,239,0.55); box-shadow: 0 0 24px rgba(217,70,239,0.18); }
+}
+
+/* Banner after the file has been destroyed */
+.dl-burned-banner {
+  background: linear-gradient(135deg, rgba(217,70,239,0.18), rgba(168,85,247,0.12));
+  border: 1px solid rgba(217,70,239,0.45);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  margin-bottom: 18px;
+  font-size: 0.85rem;
+  color: #f3b4e8;
+  line-height: 1.5;
+  box-shadow: 0 0 30px rgba(217,70,239,0.15);
+}
+.dl-burned-banner strong { color: #fff; }
+
+/* QR toggle button */
+.dl-qr-toggle {
+  margin-top: 12px;
+  background: rgba(24,22,46,0.5);
+  border: 1px solid rgba(168,85,247,0.3);
+  color: var(--cyan);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all var(--transition);
+  letter-spacing: 0.02em;
+}
+.dl-qr-toggle:hover {
+  border-color: var(--cyan);
+  background: rgba(103,232,249,0.1);
+  box-shadow: 0 0 18px rgba(103,232,249,0.2);
+  transform: translateY(-1px);
+}
+
+/* QR panel */
+.dl-qr-panel {
+  margin: 0 auto 22px;
+  max-width: 240px;
+  text-align: center;
+  animation: fadeIn 0.4s ease;
+}
+.dl-qr-canvas {
+  background: #fff;
+  padding: 14px;
+  border-radius: 16px;
+  display: inline-block;
+  box-shadow: 0 0 40px rgba(168,85,247,0.25), 0 8px 24px rgba(0,0,0,0.4);
+  border: 2px solid rgba(168,85,247,0.3);
+}
+.dl-qr-canvas svg { display: block; width: 180px; height: 180px; }
+.dl-qr-hint {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}

@@ -113,6 +113,8 @@ async function upload(filePath, expiresIn) {
   form.append('filename_enc', encryptedNameB64);
   form.append('content_type_enc', encryptedTypeB64);
   if (expiresIn) form.append('expires_in', expiresIn);
+  const burn = process.env.NYXVAULT_BURN === '1' || process.argv[5] === 'burn';
+  if (burn) { form.append('burn_after_read', '1'); console.log('🔥 Burn-after-reading enabled — file self-destructs after first decrypt.'); }
   
   const result = await postForm(`${BASE_URL}/api/upload`, form, { 'X-Api-Key': API_KEY });
   

@@ -22,6 +22,13 @@
         </div>
         <h2>NyxVault</h2>
         <p class="dl-tagline">End-to-End Encrypted · Zero Knowledge</p>
+        <button type="button" class="dl-qr-toggle" id="qrToggle" title="Show QR code to open on your phone">▦ Open on phone</button>
+      </div>
+
+      <!-- QR code panel -->
+      <div class="dl-qr-panel" id="qrPanel" style="display:none;">
+        <div class="dl-qr-canvas" id="qrCanvas"></div>
+        <p class="dl-qr-hint">Scan to open this link on your phone</p>
       </div>
 
       <!-- Loading -->
@@ -37,6 +44,10 @@
 
       <!-- File / Decrypt form -->
       <div id="fileState" class="dl-section" style="display:none;">
+        <div class="dl-burn-warn" id="burnWarn" style="display:none;">
+          <span class="dl-burn-flame">→🔥</span>
+          <div><strong>Burn after reading</strong><br><span>This file self-destructs the moment it's decrypted. You can only open it <b>once</b> — save it right away.</span></div>
+        </div>
         <div class="dl-fileinfo">
           <div class="dl-fileicon" id="dlFileIcon"><img src="/assets/icon-file-128.png" alt="file" class="nyx-ic"></div>
           <div class="dl-filetext">
@@ -63,6 +74,9 @@
 
       <!-- Result: preview + actions -->
       <div id="resultState" class="dl-section" style="display:none;">
+        <div class="dl-burned-banner" id="burnedBanner" style="display:none;">
+          🔥 <strong>This file has been destroyed.</strong> It no longer exists on the server — download it now or it's gone forever.
+        </div>
         <div class="dl-result-head">
           <div class="dl-status-icon success">✓</div>
           <p class="dl-result-name" id="resultName">file</p>
@@ -129,6 +143,7 @@
   <script src="/lib/nacl-fast.min.js"></script>
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
+  <script src="/lib/qrcode.min.js"></script>
   <script>
   const SALT_BYTES = 16, NONCE_BYTES = 24, CHUNK_SIZE = 4 * 1024 * 1024, SECRETBOX_OVERHEAD = 16;
 
@@ -227,6 +242,32 @@
   function show(id){ $(id).style.display = 'block'; }
   function hide(id){ $(id).style.display = 'none'; }
 
+  // QR code: render the current download URL so it can be opened on a phone.
+  let qrRendered = false;
+  function renderQR() {
+    if (qrRendered) return;
+    try {
+      const qr = qrcode(0, 'M');
+      qr.addData(window.location.href);
+      qr.make();
+      $('qrCanvas').innerHTML = qr.createSvgTag({ cellSize: 5, margin: 2, scalable: true });
+      qrRendered = true;
+    } catch (e) {
+      $('qrCanvas').textContent = 'Could not render QR code.';
+    }
+  }
+  $('qrToggle').addEventListener('click', () => {
+    const panel = $('qrPanel');
+    if (panel.style.display === 'none') {
+      renderQR();
+      panel.style.display = 'block';
+      $('qrToggle').textContent = '× Hide QR';
+    } else {
+      panel.style.display = 'none';
+      $('qrToggle').textContent = '▦ Open on phone';
+    }
+  });
+
   // Load metadata
   fetch('/api/dl/' + token + '/meta').then(r=>r.json()).then(meta => {
     if (meta.error) {
@@ -236,6 +277,7 @@
     fileMeta = meta;
     $('dlFileName').textContent = meta.original_name || 'Encrypted File';
     $('dlFileMeta').textContent = fmtSize(meta.size_bytes) + ' · ' + new Date(meta.upload_date).toLocaleDateString();
+    if (meta.burn_after_read) { $('burnWarn').style.display = 'flex'; }
     hide('loadingState'); show('fileState');
   }).catch(()=>{ hide('loadingState'); show('errorState'); });
 
@@ -281,6 +323,14 @@
       renderResult(decrypted, decryptedContentType, decryptedFilename);
       show('resultState');
       toast('Decrypted: ' + decryptedFilename, 'success');
+
+      // Burn after reading: now that decryption succeeded, tell the server to destroy it.
+      if (fileMeta && fileMeta.burn_after_read) {
+        $('burnedBanner').style.display = 'block';
+        fetch('/api/dl/' + token + '/burn', { method: 'POST' })
+          .then(()=>toast('File destroyed — save it now 🔥', 'info'))
+          .catch(()=>{});
+      }
 
       // VirusTotal hash lookup (privacy-preserving: only hash leaves the browser)
       runVirusTotal(decrypted);

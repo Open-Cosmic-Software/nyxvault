@@ -68,9 +68,10 @@ db.exec(`
 
 // Prepared statements
 const stmtInsert = db.prepare(`
-  INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name, burn_after_read)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
+const stmtMarkDownloaded = db.prepare(`UPDATE files SET downloaded_at = datetime('now') WHERE id = ?`);
 const stmtGetAll = db.prepare(`SELECT * FROM files ORDER BY upload_date DESC`);
 const stmtGetById = db.prepare(`SELECT * FROM files WHERE id = ?`);
 const stmtGetByToken = db.prepare(`SELECT * FROM files WHERE download_token = ?`);
@@ -230,6 +231,7 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
     const contentTypeEnc = req.body.content_type_enc || '';
     const expiresAt = req.body.expires_at || null;
     const nonce = req.body.nonce || '';
+    const burnAfterRead = (req.body.burn_after_read === '1' || req.body.burn_after_read === 'true' || req.body.burn_after_read === true) ? 1 : 0;
     // Don't store original filename (privacy: zero-knowledge)
     const originalName = 'redacted';
 
@@ -247,7 +249,8 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
       contentTypeEnc,
       expiresAt,
       nonce,
-      originalName
+      originalName,
+      burnAfterRead
     );
 
     const file = stmtGetById.get(result.lastInsertRowid);
@@ -434,7 +437,8 @@ app.get('/api/dl/:token/meta', downloadLimiter, (req, res) => {
       size_bytes: file.size_bytes,
       upload_date: file.upload_date,
       uploader: file.uploader,
-      nonce: file.nonce
+      nonce: file.nonce,
+      burn_after_read: !!file.burn_after_read
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
@@ -464,6 +468,31 @@ app.get('/api/dl/:token/blob', downloadLimiter, (req, res) => {
     return fs.createReadStream(filePath).pipe(res);
   } catch (err) {
     return res.status(500).json({ error: 'Download failed' });
+  }
+});
+
+// ── Public: Burn after reading ────────────────────────────
+// Called by the download page ONLY after a successful client-side decryption,
+// so a wrong passphrase never destroys the file. Zero-knowledge preserved:
+// the server learns nothing about the content, only that it may now self-destruct.
+app.post('/api/dl/:token/burn', downloadLimiter, (req, res) => {
+  try {
+    if (!/^[a-f0-9]{64}$/.test(req.params.token)) {
+      return res.status(400).json({ error: 'Invalid token format' });
+    }
+    const file = stmtGetByToken.get(req.params.token);
+    if (!file) return res.json({ burned: true, already: true });
+    if (!file.burn_after_read) {
+      return res.json({ burned: false, reason: 'not a burn-after-read file' });
+    }
+    const filePath = path.join(STORAGE_DIR, file.download_token);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    stmtDelete.run(file.id);
+    console.log(`[BURN] File #${file.id} self-destructed after read (token:${file.download_token.slice(0,8)}...)`);
+    return res.json({ burned: true });
+  } catch (err) {
+    console.error('Burn error:', err.message);
+    return res.status(500).json({ error: 'Burn failed' });
   }
 });
 
