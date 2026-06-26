@@ -36,7 +36,7 @@ Encrypt in your browser. Share a link. The server never sees your data.
 ### Install
 
 ```bash
-git clone https://github.com/fabudde/nyxvault.git
+git clone https://github.com/OCS-Open-Cosmic-Software/nyxvault.git
 cd nyxvault
 npm install
 cp .env.example .env
