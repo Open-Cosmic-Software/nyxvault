@@ -2,6 +2,16 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.0.2] — 2026-06-27
+
+### 🔒 Security: dependency updates
+
+- **multer** `2.1.1 → 2.2.0` — patches 2 high-severity advisories.
+- **form-data** `→ 4.0.6` — patches CRLF injection (GHSA-hmw2-7cc7-3qxx).
+- `npm audit`: **0 vulnerabilities**.
+
+---
+
 ## [2.0.1] — 2026-06-22
 
 ### 🛡️ Anti-Downgrade: NYX2 Legacy Path Removed from Browser

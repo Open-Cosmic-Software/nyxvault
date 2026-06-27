@@ -1,6 +1,6 @@
 {
   "name": "nyxvault",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "End-to-end encrypted, zero-knowledge file sharing. Encrypt in your browser, share a link — the server never sees your data.",
   "main": "server.js",
   "type": "commonjs",
@@ -37,7 +37,7 @@
     "express-rate-limit": "^8.5.2",
     "form-data": "^4.0.5",
     "hash-wasm": "^4.12.0",
-    "multer": "^2.1.1",
+    "multer": "^2.2.0",
     "qrcode-generator": "^2.0.4",
     "tweetnacl": "^1.0.3",
     "uuid": "^14.0.0"
