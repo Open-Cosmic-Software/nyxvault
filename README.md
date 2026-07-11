@@ -189,7 +189,7 @@ Key properties:
 
 | Property | How |
 |---|---|
-| **Encryption** | Argon2id (16 MB, 3 iterations) derives a key from your passphrase; XSalsa20-Poly1305 (`nacl.secretbox`) encrypts the data. Since v2.0 (NYX3 format), each chunk includes an authenticated index prefix and the header is HMAC-protected. |
+| **Encryption** | Argon2id (21 MB, 3 iterations — NYX4 format; older NYX3 files used 16 MB and stay decryptable) derives a key from your passphrase; XSalsa20-Poly1305 (`nacl.secretbox`) encrypts the data. Since v2.0, each chunk includes an authenticated index prefix and the header is HMAC-protected. |
 | **Where** | 100% client-side — browser or CLI. The server receives only ciphertext. |
 | **Filename privacy** | The original filename and content type are themselves encrypted; the server stores `redacted`. |
 | **Passphrase** | Never transmitted. Not stored. Not recoverable. |

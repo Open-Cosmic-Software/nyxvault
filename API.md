@@ -224,15 +224,23 @@ curl -s -X POST "https://host/api/dl/<token>/burn"
 
 All encryption uses **Argon2id** for key derivation and **`nacl.secretbox`** (XSalsa20-Poly1305) for authenticated encryption.
 
-**Argon2id parameters (fixed):**
-`parallelism=1, iterations=3, memorySize=16384 KiB (16 MB), hashLength=32`.
+**Argon2id parameters** (selected by format magic — always `parallelism=1, iterations=3, hashLength=32`):
 
-### Chunked format (files) — magic `NYX3` (current) / `NYX2` (legacy)
+| Format | `memorySize` |
+|---|---|
+| `NYX4` (current, v2.3.1+) | `21504` KiB (21 MB) |
+| `NYX3` / `NYX2` / legacy single-block | `16384` KiB (16 MB) |
+| very old single-block strings | `65536` KiB fallback |
 
-#### NYX3 (v2.0+, integrity-protected)
-Used by the CLI and web UI since v2.0. Layout:
+Decryptors MUST select the KDF memory from the magic; encryptors MUST write `NYX4`.
+
+### Chunked format (files) — magic `NYX4` (current) / `NYX3`, `NYX2` (legacy)
+
+#### NYX4 / NYX3 (integrity-protected)
+`NYX4` and `NYX3` share an identical byte layout — the magic only changes the
+Argon2id `memorySize` (see table above). Used by the CLI and web UI since v2.0:
 ```
-"NYX3"            4 bytes   magic
+"NYX4" | "NYX3"   4 bytes   magic
 salt              16 bytes  Argon2id salt
 header_hmac       32 bytes  HMAC-SHA256(hmac_subkey, magic ‖ salt ‖ num_chunks)
 num_chunks        4 bytes   uint32 big-endian
@@ -257,7 +265,7 @@ repeated num_chunks times:
 ```
 Each chunk is `nacl.secretbox(plaintextChunk, nonce, key)`. No chunk index or HMAC. The last chunk may be shorter. Chunk plaintext size is `CHUNK_SIZE = 4 MiB`.
 
-Decryptors MUST auto-detect the format by reading the first 4 bytes (magic). NYX3 files start with `0x4E 0x59 0x58 0x33`; NYX2 files start with `0x4E 0x59 0x58 0x32`.
+Decryptors MUST auto-detect the format by reading the first 4 bytes (magic). NYX4 files start with `0x4E 0x59 0x58 0x34`; NYX3 with `0x4E 0x59 0x58 0x33`; NYX2 with `0x4E 0x59 0x58 0x32`. The header HMAC is always computed over the *actual* magic bytes, so the format version is authenticated.
 
 ### Single-block format (metadata) — legacy
 Used for short strings like `filename_enc` / `content_type_enc`, base64-encoded:
@@ -266,11 +274,11 @@ salt              16 bytes
 nonce             24 bytes
 ciphertext        plaintext + 16 bytes tag
 ```
-Decryption tries `memorySize` 16384 then 65536 for backward compatibility.
+Decryption tries `memorySize` 21504, then 16384, then 65536 for backward compatibility (new strings are encrypted with 21504).
 
 ### Reference pseudocode (decrypt)
 ```js
-key = argon2id(passphrase, salt, {parallelism:1, iterations:3, memorySize:16384, hashLength:32})
+key = argon2id(passphrase, salt, {parallelism:1, iterations:3, memorySize: magic == "NYX4" ? 21504 : 16384, hashLength:32})
 plaintext = nacl.secretbox.open(ciphertext, nonce, key)  // null ⇒ wrong passphrase
 ```
 

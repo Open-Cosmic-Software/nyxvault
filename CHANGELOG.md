@@ -2,6 +2,27 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.3.1] — 2026-07-11
+
+### 🔐 Argon2id memory raised: 16 MB → 21 MB (new NYX4 format)
+
+- New passphrase encryptions use **21 MB (21504 KiB) Argon2id memory** instead
+  of 16 MB — a stronger work factor against GPU/ASIC brute force.
+- Introduced the **NYX4 format magic**: byte-layout identical to NYX3, but the
+  magic tells the decryptor which KDF parameters to use (NYX4 → 21 MB,
+  NYX3 → 16 MB). **Every existing file keeps decrypting exactly as before** —
+  KDF params are now versioned by the format, never guessed.
+- The header HMAC is computed over the *actual* magic bytes, so the format
+  version itself is authenticated (a tampered NYX4→NYX3 downgrade fails).
+- Applied consistently across the web app, download page, `nyx-upload.js`,
+  `nyx-decrypt.js` and `nyx-migrate.js` (migration now emits NYX4). Encrypted
+  metadata strings (filenames/content types) also use 21 MB for new uploads,
+  with 21 → 16 → 64 MB fallback on decrypt.
+- Passkey-mode files are unaffected (they use a random file key, not Argon2).
+- Verified: 21 MB browser passkey E2E, browser passphrase round-trip (NYX4),
+  CLI NYX4 round-trip, **and a real 16 MB-era NYX3 file decrypting in both the
+  browser and the CLI** — all byte-identical.
+
 ## [2.3.0] — 2026-07-11
 
 ### ✨ Admin UI redesign (cosmic lobster, but tidier)

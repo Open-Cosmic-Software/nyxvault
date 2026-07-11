@@ -16,6 +16,9 @@ const SECRETBOX_OVERHEAD = 16;
 const CHUNK_PREFIX_BYTES = 5; // 4-byte index BE + 1-byte is_last
 const MAGIC2 = Buffer.from('NYX2');
 const MAGIC3 = Buffer.from('NYX3');
+const MAGIC4 = Buffer.from('NYX4'); // same layout as NYX3, 21 MB Argon2id memory
+const ARGON2_MEM_NYX3 = 16384; // KiB
+const ARGON2_MEM_NYX4 = 21504; // KiB (21 MB)
 
 async function deriveKey(passphrase, salt, memorySize = 16384) {
   const key = await argon2id({
@@ -36,23 +39,28 @@ function isNYX2(data) {
 function isNYX3(data) {
   return data.length >= 4 && data.slice(0, 4).equals(MAGIC3);
 }
+function isNYX4(data) {
+  return data.length >= 4 && data.slice(0, 4).equals(MAGIC4);
+}
 function isChunkedFormat(data) {
-  return isNYX2(data) || isNYX3(data);
+  return isNYX2(data) || isNYX3(data) || isNYX4(data);
 }
 
 async function decryptDataNYX3(data, passphrase) {
+  const kdfMem = isNYX4(data) ? ARGON2_MEM_NYX4 : ARGON2_MEM_NYX3;
   let offset = 4;
   const salt = new Uint8Array(data.slice(offset, offset + SALT_BYTES)); offset += SALT_BYTES;
   const storedHMAC = data.slice(offset, offset + 32); offset += 32;
   const numChunks = data.readUInt32BE(offset); offset += 4;
 
-  console.log(`  NYX3 format (integrity-protected): ${numChunks} chunks`);
-  const key = await deriveKey(passphrase, salt, 16384);
+  console.log(`  ${isNYX4(data) ? 'NYX4' : 'NYX3'} format (integrity-protected): ${numChunks} chunks`);
+  const key = await deriveKey(passphrase, salt, kdfMem);
 
   // Derive HMAC subkey and verify header
   const hmacSubKey = crypto.createHmac('sha256', Buffer.from(key)).update('nyxvault-header-auth').digest();
+  // HMAC is computed over the ACTUAL magic — binds the format version
   const headerForHMAC = Buffer.alloc(4 + SALT_BYTES + 4);
-  MAGIC3.copy(headerForHMAC, 0);
+  data.copy(headerForHMAC, 0, 0, 4);
   Buffer.from(salt).copy(headerForHMAC, 4);
   headerForHMAC.writeUInt32BE(numChunks, 4 + SALT_BYTES);
   const expectedHMAC = crypto.createHmac('sha256', hmacSubKey).update(headerForHMAC).digest();
@@ -99,7 +107,7 @@ async function decryptDataNYX2(data, passphrase) {
   const numChunks = data.readUInt32BE(offset); offset += 4;
 
   console.log(`  NYX2 format (legacy): ${numChunks} chunks`);
-  const key = await deriveKey(passphrase, salt, 16384);
+  const key = await deriveKey(passphrase, salt, ARGON2_MEM_NYX3);
 
   const chunks = [];
   let totalDecrypted = 0;
@@ -125,7 +133,7 @@ async function decryptDataLegacy(data, passphrase) {
   const ciphertext = new Uint8Array(data.slice(SALT_BYTES + NONCE_BYTES));
 
   // Try 16MB first (new), then 64MB (old) for backward compatibility
-  for (const mem of [16384, 65536]) {
+  for (const mem of [ARGON2_MEM_NYX4, ARGON2_MEM_NYX3, 65536]) {
     console.log(`  Trying Argon2id with ${mem / 1024}MB...`);
     const key = await deriveKey(passphrase, salt, mem);
     const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
@@ -161,7 +169,7 @@ async function main() {
   console.log(`🔐 Decrypting ${inputFile} (${encData.length} bytes)...`);
 
   let decrypted;
-  if (isNYX3(encData)) {
+  if (isNYX3(encData) || isNYX4(encData)) {
     decrypted = await decryptDataNYX3(encData, PASSPHRASE);
   } else if (isNYX2(encData)) {
     if (!allowLegacy) {

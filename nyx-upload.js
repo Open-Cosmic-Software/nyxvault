@@ -46,7 +46,9 @@ const crypto = require('crypto');
 const SALT_BYTES = 16;
 const NONCE_BYTES = 24;
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB
-const MAGIC3 = Buffer.from('NYX3');  // integrity-protected format
+// NYX4 == NYX3 layout; new files use 21 MB Argon2id memory (NYX3 was 16 MB).
+const MAGIC4 = Buffer.from('NYX4');  // integrity-protected format (current)
+const ARGON2_MEM_NYX4 = 21504; // KiB (21 MB)
 const CHUNK_PREFIX_BYTES = 5; // 4-byte index BE + 1-byte is_last
 
 async function deriveKey(passphrase, salt) {
@@ -55,14 +57,14 @@ async function deriveKey(passphrase, salt) {
     salt,
     parallelism: 1,
     iterations: 3,
-    memorySize: 16384, // 16 MB
+    memorySize: ARGON2_MEM_NYX4, // 21 MB
     hashLength: 32,
     outputType: 'binary'
   });
   return new Uint8Array(key);
 }
 
-// Chunked encryption: NYX3(4) + salt(16) + header_hmac(32) + num_chunks(4 BE) + [nonce(24) + ciphertext]...
+// Chunked encryption: NYX4(4) + salt(16) + header_hmac(32) + num_chunks(4 BE) + [nonce(24) + ciphertext]...
 // Each chunk plaintext is prefixed with: chunk_index(4 BE) + is_last(1)
 async function encryptDataChunked(data, passphrase) {
   const salt = nacl.randomBytes(SALT_BYTES);
@@ -74,7 +76,7 @@ async function encryptDataChunked(data, passphrase) {
 
   // Build header for HMAC: magic + salt + num_chunks
   const headerForHMAC = Buffer.alloc(4 + SALT_BYTES + 4);
-  MAGIC3.copy(headerForHMAC, 0);
+  MAGIC4.copy(headerForHMAC, 0);
   Buffer.from(salt).copy(headerForHMAC, 4);
   headerForHMAC.writeUInt32BE(numChunks, 4 + SALT_BYTES);
   const headerHMAC = crypto.createHmac('sha256', hmacSubKey).update(headerForHMAC).digest();
@@ -82,7 +84,7 @@ async function encryptDataChunked(data, passphrase) {
   const buffers = [];
   // Header: magic(4) + salt(16) + hmac(32) + num_chunks(4)
   const header = Buffer.alloc(4 + SALT_BYTES + 32 + 4);
-  MAGIC3.copy(header, 0);
+  MAGIC4.copy(header, 0);
   Buffer.from(salt).copy(header, 4);
   headerHMAC.copy(header, 4 + SALT_BYTES);
   header.writeUInt32BE(numChunks, 4 + SALT_BYTES + 32);
@@ -134,19 +136,19 @@ function sealTo(message, recipPubB64) {
 }
 
 // Encrypt a file with a raw 32-byte key (FEK) instead of an Argon2 passphrase.
-// Produces the SAME NYX3 blob format — only the key SOURCE differs.
+// Produces the SAME NYX4 blob format — only the key SOURCE differs.
 async function encryptDataChunkedWithKey(data, key) {
   const salt = nacl.randomBytes(SALT_BYTES);
   const numChunks = Math.max(1, Math.ceil(data.length / CHUNK_SIZE));
   const hmacSubKey = crypto.createHmac('sha256', Buffer.from(key)).update('nyxvault-header-auth').digest();
   const headerForHMAC = Buffer.alloc(4 + SALT_BYTES + 4);
-  MAGIC3.copy(headerForHMAC, 0);
+  MAGIC4.copy(headerForHMAC, 0);
   Buffer.from(salt).copy(headerForHMAC, 4);
   headerForHMAC.writeUInt32BE(numChunks, 4 + SALT_BYTES);
   const headerHMAC = crypto.createHmac('sha256', hmacSubKey).update(headerForHMAC).digest();
   const buffers = [];
   const header = Buffer.alloc(4 + SALT_BYTES + 32 + 4);
-  MAGIC3.copy(header, 0);
+  MAGIC4.copy(header, 0);
   Buffer.from(salt).copy(header, 4);
   headerHMAC.copy(header, 4 + SALT_BYTES);
   header.writeUInt32BE(numChunks, 4 + SALT_BYTES + 32);

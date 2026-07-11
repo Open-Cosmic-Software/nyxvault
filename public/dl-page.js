@@ -1,16 +1,19 @@
   const SALT_BYTES = 16, NONCE_BYTES = 24, CHUNK_SIZE = 4 * 1024 * 1024, SECRETBOX_OVERHEAD = 16;
   const CHUNK_PREFIX_BYTES = 5; // 4-byte index BE + 1-byte is_last
-  const MAGIC3 = new Uint8Array([0x4E, 0x59, 0x58, 0x33]); // "NYX3"
+  // NYX4 == NYX3 layout; only the Argon2id memory differs (21 MB vs 16 MB).
+  const ARGON2_MEM_NYX3 = 16384;
+  const ARGON2_MEM_NYX4 = 21504;
 
-  async function deriveKey(passphrase, salt) {
+  async function deriveKey(passphrase, salt, memorySize) {
     return new Uint8Array(await hashwasm.argon2id({
       password: passphrase, salt, parallelism: 1, iterations: 3,
-      memorySize: 16384, hashLength: 32, outputType: 'binary'
+      memorySize, hashLength: 32, outputType: 'binary'
     }));
   }
   function isNYX2(d){ return d.length>=4 && d[0]===0x4E && d[1]===0x59 && d[2]===0x58 && d[3]===0x32; }
   function isNYX3(d){ return d.length>=4 && d[0]===0x4E && d[1]===0x59 && d[2]===0x58 && d[3]===0x33; }
-  function isChunkedFormat(d){ return isNYX2(d) || isNYX3(d); }
+  function isNYX4(d){ return d.length>=4 && d[0]===0x4E && d[1]===0x59 && d[2]===0x58 && d[3]===0x34; }
+  function isChunkedFormat(d){ return isNYX2(d) || isNYX3(d) || isNYX4(d); }
 
   // HMAC-SHA256 via Web Crypto
   async function hmacSHA256(key, data) {
@@ -21,17 +24,18 @@
     return await hmacSHA256(encKey, new TextEncoder().encode('nyxvault-header-auth'));
   }
 
-  // NYX3 decrypt (integrity-verified)
+  // NYX3/NYX4 decrypt (integrity-verified; KDF memory picked from the magic)
   async function decryptDataNYX3(data, passphrase, onProgress, keyProvider) {
+    const kdfMem = isNYX4(data) ? ARGON2_MEM_NYX4 : ARGON2_MEM_NYX3;
     let offset = 4;
     const salt = data.slice(offset, offset+SALT_BYTES); offset += SALT_BYTES;
     const storedHMAC = data.slice(offset, offset+32); offset += 32;
     const numChunks = (data[offset]<<24)|(data[offset+1]<<16)|(data[offset+2]<<8)|data[offset+3]; offset += 4;
-    const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt);
+    const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt, kdfMem);
     const hmacKey = await deriveHMACKey(key);
-    // Verify header HMAC
+    // Verify header HMAC (over the ACTUAL magic — binds the format version)
     const hdr = new Uint8Array(4+SALT_BYTES+4);
-    hdr.set(MAGIC3,0); hdr.set(salt,4);
+    hdr.set(data.slice(0,4),0); hdr.set(salt,4);
     hdr[4+SALT_BYTES]=(numChunks>>>24)&0xFF; hdr[4+SALT_BYTES+1]=(numChunks>>>16)&0xFF;
     hdr[4+SALT_BYTES+2]=(numChunks>>>8)&0xFF; hdr[4+SALT_BYTES+3]=numChunks&0xFF;
     const expectedHMAC = await hmacSHA256(hmacKey, hdr);
@@ -62,12 +66,12 @@
   }
 
   async function decryptData(blob, passphrase, onProgress, keyProvider) {
-    if (isNYX3(blob)) return decryptDataNYX3(blob, passphrase, onProgress, keyProvider);
+    if (isNYX3(blob) || isNYX4(blob)) return decryptDataNYX3(blob, passphrase, onProgress, keyProvider);
     if (isNYX2(blob)) throw new Error('This file uses the legacy NYX2 format without integrity protection. Ask the uploader to migrate it using: node nyx-migrate.js');
     const salt = blob.slice(0, SALT_BYTES);
     const nonce = blob.slice(SALT_BYTES, SALT_BYTES+NONCE_BYTES);
     const ct = blob.slice(SALT_BYTES+NONCE_BYTES);
-    for (const mem of [16384, 65536]) {
+    for (const mem of [ARGON2_MEM_NYX4, ARGON2_MEM_NYX3, 65536]) {
       const key = new Uint8Array(await hashwasm.argon2id({
         password: passphrase, salt, parallelism: 1, iterations: 3,
         memorySize: mem, hashLength: 32, outputType: 'binary'
@@ -89,7 +93,7 @@
       if (dec) return nacl.util.encodeUTF8(dec);
       throw new Error('Decryption failed \u2013 wrong passkey?');
     }
-    for (const mem of [16384, 65536]) {
+    for (const mem of [ARGON2_MEM_NYX4, ARGON2_MEM_NYX3, 65536]) {
       const key = new Uint8Array(await hashwasm.argon2id({
         password: passphrase, salt, parallelism: 1, iterations: 3,
         memorySize: mem, hashLength: 32, outputType: 'binary'

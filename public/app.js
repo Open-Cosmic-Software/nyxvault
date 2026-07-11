@@ -6,19 +6,29 @@
 const SALT_BYTES = 16;
 const NONCE_BYTES = 24; // XSalsa20-Poly1305 = secretbox
 const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB
-const MAGIC2 = new Uint8Array([0x4E, 0x59, 0x58, 0x32]); // "NYX2" (legacy)
-const MAGIC3 = new Uint8Array([0x4E, 0x59, 0x58, 0x33]); // "NYX3" (integrity-protected)
+
 const SECRETBOX_OVERHEAD = 16; // Poly1305 tag
 const CHUNK_PREFIX_BYTES = 5; // 4-byte index BE + 1-byte is_last flag
 
-// Argon2id key derivation (using hash-wasm) — 16 MB (was 64 MB)
-async function deriveKey(passphrase, salt) {
+// Format magics. NYX4 (current) has the exact same layout as NYX3 — the only
+// difference is the passphrase KDF: NYX4 uses 21 MB Argon2id memory, NYX3 used
+// 16 MB. Decryption selects the KDF params from the magic, so old files keep
+// working forever.
+const MAGIC2 = new Uint8Array([0x4E, 0x59, 0x58, 0x32]); // "NYX2" (legacy, no integrity)
+const MAGIC3 = new Uint8Array([0x4E, 0x59, 0x58, 0x33]); // "NYX3" (integrity-protected, 16 MB KDF)
+const MAGIC4 = new Uint8Array([0x4E, 0x59, 0x58, 0x34]); // "NYX4" (integrity-protected, 21 MB KDF)
+const ARGON2_MEM_NYX3 = 16384; // KiB — legacy files
+const ARGON2_MEM_NYX4 = 21504; // KiB (21 MB) — all new encryption
+
+// Argon2id key derivation (using hash-wasm). Defaults to the NYX4 params;
+// pass an explicit memorySize when decrypting older formats.
+async function deriveKey(passphrase, salt, memorySize = ARGON2_MEM_NYX4) {
   const key = await hashwasm.argon2id({
     password: passphrase,
     salt: salt,
     parallelism: 1,
     iterations: 3,
-    memorySize: 16384, // 16MB — still secure (OWASP min: 15MB)
+    memorySize: memorySize,
     hashLength: 32,
     outputType: 'binary'
   });
@@ -40,8 +50,11 @@ function isNYX2(data) {
 function isNYX3(data) {
   return data.length >= 4 && data[0] === 0x4E && data[1] === 0x59 && data[2] === 0x58 && data[3] === 0x33;
 }
+function isNYX4(data) {
+  return data.length >= 4 && data[0] === 0x4E && data[1] === 0x59 && data[2] === 0x58 && data[3] === 0x34;
+}
 function isChunkedFormat(data) {
-  return isNYX2(data) || isNYX3(data);
+  return isNYX2(data) || isNYX3(data) || isNYX4(data);
 }
 
 // ── HMAC-SHA256 via Web Crypto ─────
@@ -71,7 +84,7 @@ async function encryptDataChunked(data, passphrase, onProgress, keyProvider) {
 
   // Build header bytes for HMAC: magic + salt + num_chunks
   const headerForHMAC = new Uint8Array(4 + SALT_BYTES + 4);
-  headerForHMAC.set(MAGIC3, 0);
+  headerForHMAC.set(MAGIC4, 0);
   headerForHMAC.set(salt, 4);
   headerForHMAC[4 + SALT_BYTES] = (numChunks >>> 24) & 0xFF;
   headerForHMAC[4 + SALT_BYTES + 1] = (numChunks >>> 16) & 0xFF;
@@ -91,7 +104,7 @@ async function encryptDataChunked(data, passphrase, onProgress, keyProvider) {
   let offset = 0;
 
   // Write magic
-  result.set(MAGIC3, offset); offset += 4;
+  result.set(MAGIC4, offset); offset += 4;
   // Write salt
   result.set(salt, offset); offset += SALT_BYTES;
   // Write header HMAC
@@ -129,20 +142,22 @@ async function encryptDataChunked(data, passphrase, onProgress, keyProvider) {
   return { blob: result, salt };
 }
 
-// ── Chunked Decrypt (NYX3 format — integrity-verified) ─────
+// ── Chunked Decrypt (NYX3/NYX4 layout — integrity-verified) ─────
+// KDF memory is selected from the magic byte (NYX3 → 16 MB, NYX4 → 21 MB).
 async function decryptDataNYX3(data, passphrase, onProgress, keyProvider) {
+  const kdfMem = isNYX4(data) ? ARGON2_MEM_NYX4 : ARGON2_MEM_NYX3;
   let offset = 4; // skip magic
   const salt = data.slice(offset, offset + SALT_BYTES); offset += SALT_BYTES;
   const storedHMAC = data.slice(offset, offset + 32); offset += 32;
   const numChunks = (data[offset] << 24) | (data[offset+1] << 16) | (data[offset+2] << 8) | data[offset+3];
   offset += 4;
 
-  const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt);
+  const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt, kdfMem);
   const hmacKey = await deriveHMACKey(key);
 
-  // Verify header HMAC
+  // Verify header HMAC (over the ACTUAL magic — binds the format version)
   const headerForHMAC = new Uint8Array(4 + SALT_BYTES + 4);
-  headerForHMAC.set(MAGIC3, 0);
+  headerForHMAC.set(data.slice(0, 4), 0);
   headerForHMAC.set(salt, 4);
   headerForHMAC[4 + SALT_BYTES] = (numChunks >>> 24) & 0xFF;
   headerForHMAC[4 + SALT_BYTES + 1] = (numChunks >>> 16) & 0xFF;
@@ -219,17 +234,17 @@ async function deriveKeyWithMem(passphrase, salt, memorySize) {
 
 // ── Decrypt (auto-detects format) ─────
 async function decryptData(encryptedBlob, passphrase, onProgress, keyProvider) {
-  if (isNYX3(encryptedBlob)) {
+  if (isNYX3(encryptedBlob) || isNYX4(encryptedBlob)) {
     return decryptDataNYX3(encryptedBlob, passphrase, onProgress, keyProvider);
   }
   if (isNYX2(encryptedBlob)) {
     throw new Error('This file uses the legacy NYX2 format without integrity protection. Migrate it to NYX3 first using: node nyx-migrate.js <file> <passphrase>');
   }
-  // Legacy format — try 16MB first, then 64MB for old files
+  // Legacy format — try current 21MB, then 16MB, then 64MB for old files
   const salt = encryptedBlob.slice(0, SALT_BYTES);
   const nonce = encryptedBlob.slice(SALT_BYTES, SALT_BYTES + NONCE_BYTES);
   const ciphertext = encryptedBlob.slice(SALT_BYTES + NONCE_BYTES);
-  for (const mem of [16384, 65536]) {
+  for (const mem of [ARGON2_MEM_NYX4, ARGON2_MEM_NYX3, 65536]) {
     const key = await deriveKeyWithMem(passphrase, salt, mem);
     const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
     if (decrypted) return decrypted;
@@ -265,8 +280,8 @@ async function decryptString(b64, passphrase, keyProvider) {
     if (decrypted) return nacl.util.encodeUTF8(decrypted);
     throw new Error('Decryption failed – wrong passkey?');
   }
-  // Try 16MB first, then 64MB for old encrypted strings
-  for (const mem of [16384, 65536]) {
+  // Try current 21MB first, then 16MB / 64MB for old encrypted strings
+  for (const mem of [ARGON2_MEM_NYX4, ARGON2_MEM_NYX3, 65536]) {
     const key = await deriveKeyWithMem(passphrase, salt, mem);
     const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
     if (decrypted) return nacl.util.encodeUTF8(decrypted);

@@ -24,6 +24,8 @@ const SECRETBOX_OVERHEAD = 16;
 const CHUNK_PREFIX_BYTES = 5;
 const MAGIC2 = Buffer.from('NYX2');
 const MAGIC3 = Buffer.from('NYX3');
+const MAGIC4 = Buffer.from('NYX4'); // current format: NYX3 layout, 21 MB Argon2id
+const ARGON2_MEM_NYX4 = 21504;
 
 async function deriveKey(passphrase, salt, memorySize = 16384) {
   return new Uint8Array(await argon2id({
@@ -34,7 +36,7 @@ async function deriveKey(passphrase, salt, memorySize = 16384) {
 
 // ── NYX2 Decrypt (legacy) ────────────────────────────────
 function isNYX2(data) { return data.length >= 4 && data.slice(0, 4).equals(MAGIC2); }
-function isNYX3(data) { return data.length >= 4 && data.slice(0, 4).equals(MAGIC3); }
+function isNYX3(data) { return data.length >= 4 && (data.slice(0, 4).equals(MAGIC3) || data.slice(0, 4).equals(MAGIC4)); }
 
 async function decryptNYX2(data, passphrase) {
   let offset = 4;
@@ -58,21 +60,21 @@ async function decryptNYX2(data, passphrase) {
 }
 
 // ── NYX3 Encrypt ─────────────────────────────────────────
-async function encryptNYX3(data, passphrase) {
+async function encryptNYX3(data, passphrase) { // emits NYX4 (current format)
   const salt = nacl.randomBytes(SALT_BYTES);
-  const key = await deriveKey(passphrase, salt);
+  const key = await deriveKey(passphrase, salt, ARGON2_MEM_NYX4);
   const numChunks = Math.max(1, Math.ceil(data.length / CHUNK_SIZE));
 
   const hmacSubKey = crypto.createHmac('sha256', Buffer.from(key)).update('nyxvault-header-auth').digest();
   const headerForHMAC = Buffer.alloc(4 + SALT_BYTES + 4);
-  MAGIC3.copy(headerForHMAC, 0);
+  MAGIC4.copy(headerForHMAC, 0);
   Buffer.from(salt).copy(headerForHMAC, 4);
   headerForHMAC.writeUInt32BE(numChunks, 4 + SALT_BYTES);
   const headerHMAC = crypto.createHmac('sha256', hmacSubKey).update(headerForHMAC).digest();
 
   const buffers = [];
   const header = Buffer.alloc(4 + SALT_BYTES + 32 + 4);
-  MAGIC3.copy(header, 0);
+  MAGIC4.copy(header, 0);
   Buffer.from(salt).copy(header, 4);
   headerHMAC.copy(header, 4 + SALT_BYTES);
   header.writeUInt32BE(numChunks, 4 + SALT_BYTES + 32);
