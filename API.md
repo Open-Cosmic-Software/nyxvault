@@ -228,7 +228,7 @@ All encryption uses **Argon2id** for key derivation and **`nacl.secretbox`** (XS
 
 | Format | `memorySize` |
 |---|---|
-| `NYX4` (current, v2.3.1+) | `21504` KiB (21 MB) |
+| `NYX4` (current, v2.3.0+) | `21504` KiB (21 MB) |
 | `NYX3` / `NYX2` / legacy single-block | `16384` KiB (16 MB) |
 | very old single-block strings | `65536` KiB fallback |
 
