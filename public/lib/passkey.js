@@ -122,33 +122,62 @@ function passkeySupported() {
     navigator.credentials && navigator.credentials.get;
 }
 
+// Turn a DOMException into a readable, actionable error message.
+function friendlyWebAuthnError(e, phase) {
+  const name = (e && e.name) || '';
+  if (name === 'NotAllowedError') {
+    return phase + ' was cancelled or timed out. Please try again and approve the passkey prompt.';
+  }
+  if (name === 'InvalidStateError') {
+    return 'This passkey already exists on this device.';
+  }
+  if (name === 'SecurityError') {
+    return 'Security error — the page origin does not match the passkey configuration (' + (e.message || '') + ').';
+  }
+  return phase + ' failed: ' + (name ? name + ': ' : '') + (e && e.message ? e.message : String(e));
+}
+
 // Low-level: run create() and return the raw credential payload for the server.
-async function doCreate(options) {
+// `prfSaltBytes` (optional): request a PRF evaluation during creation — modern
+// Chromium returns prf.results.first right away, saving a whole extra ceremony.
+async function doCreate(options, prfSaltBytes) {
   const publicKey = {
     ...options,
     challenge: b64urlToBytes(options.challenge),
     user: { ...options.user, id: b64urlToBytes(options.user.id) },
     excludeCredentials: (options.excludeCredentials || []).map(c => ({ ...c, id: b64urlToBytes(c.id) }))
   };
-  publicKey.extensions = Object.assign({}, options.extensions, { prf: {} });
+  const prfReq = prfSaltBytes ? { eval: { first: prfSaltBytes } } : {};
+  publicKey.extensions = Object.assign({}, options.extensions, { prf: prfReq });
   let cred;
   try {
     cred = await navigator.credentials.create({ publicKey });
   } catch (e) {
-    throw new Error('Passkey creation was cancelled or failed on this device.');
+    throw new Error(friendlyWebAuthnError(e, 'Passkey creation'));
   }
   if (!cred) throw new Error('Passkey creation was cancelled.');
   const att = cred.response;
+  const ext = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+  // PRF capability check: if the authenticator explicitly reports no PRF
+  // support, fail NOW with a clear message instead of a confusing one later.
+  if (ext.prf && ext.prf.enabled === false) {
+    throw new Error('This authenticator does not support the PRF (hmac-secret) extension required for encryption. Try a different device — e.g. an iPhone/iPad or Android phone passkey (via QR code), or a security key.');
+  }
+  const prfFromCreate = (ext.prf && ext.prf.results && ext.prf.results.first)
+    ? new Uint8Array(ext.prf.results.first) : null;
   return {
-    id: cred.id,
-    rawId: bytesToB64url(new Uint8Array(cred.rawId)),
-    type: cred.type,
-    response: {
-      clientDataJSON: bytesToB64url(new Uint8Array(att.clientDataJSON)),
-      attestationObject: bytesToB64url(new Uint8Array(att.attestationObject)),
-      transports: att.getTransports ? att.getTransports() : undefined
-    },
-    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {}
+    prfFromCreate,
+    payload: {
+      id: cred.id,
+      rawId: bytesToB64url(new Uint8Array(cred.rawId)),
+      type: cred.type,
+      response: {
+        clientDataJSON: bytesToB64url(new Uint8Array(att.clientDataJSON)),
+        attestationObject: bytesToB64url(new Uint8Array(att.attestationObject)),
+        transports: att.getTransports ? att.getTransports() : undefined
+      },
+      clientExtensionResults: {} // never leak PRF output to the server
+    }
   };
 }
 
@@ -192,7 +221,7 @@ async function doGetPRF(options, allowCreds, opts) {
   try {
     assertion = await navigator.credentials.get({ publicKey });
   } catch (e) {
-    throw new Error('No matching passkey found on this device, or the request was cancelled.');
+    throw new Error(friendlyWebAuthnError(e, 'Passkey authentication'));
   }
   if (!assertion) throw new Error('Passkey authentication was cancelled.');
 
@@ -279,21 +308,29 @@ async function passkeyRegister(sessionToken, label) {
     vaultPubB64 = bytesToB64(kp.publicKey);
   }
 
-  // Step 3: create the new passkey.
-  const createPayload = await doCreate(options);
+  // Step 3: create the new passkey — requesting a PRF evaluation with the new
+  // salt right away. Modern Chromium returns prf.results at creation, which
+  // saves the extra authentication ceremony entirely.
+  const { prfFromCreate, payload: createPayload } = await doCreate(options, newPrfSalt);
 
-  // Step 4: PRF ceremony on the NEW passkey → KEK → wrap the vault privkey.
-  const authOptRes2 = await fetch('/api/webauthn/auth/options', { method: 'POST' });
-  if (!authOptRes2.ok) throw new Error('Could not verify PRF on the new passkey');
-  const authOpts2 = await authOptRes2.json();
+  // Step 4: obtain the new passkey's PRF output → KEK → wrap the vault privkey.
   let wrappedPrivB64;
   try {
-    const { prfOutput: newPrf, assertionPayload } = await doGetPRF(
-      authOpts2, [{ cred_id: createPayload.id, prf_salt: newPrfSaltB64,
-        transports: createPayload.response.transports }],
-      { evalByCredential: false, firstSalt: newPrfSalt }
-    );
-    await verifyAssertion(authOpts2.flowId, assertionPayload);
+    let newPrf = prfFromCreate;
+    if (!newPrf) {
+      // Authenticator didn't evaluate PRF at creation — run a get() ceremony.
+      // NOTE: no server-side assertion verify here; the new credential isn't
+      // persisted server-side yet (that happens in step 5).
+      const authOptRes2 = await fetch('/api/webauthn/auth/options', { method: 'POST' });
+      if (!authOptRes2.ok) throw new Error('Could not verify PRF on the new passkey');
+      const authOpts2 = await authOptRes2.json();
+      const r = await doGetPRF(
+        authOpts2, [{ cred_id: createPayload.id, prf_salt: newPrfSaltB64,
+          transports: createPayload.response.transports }],
+        { evalByCredential: false, firstSalt: newPrfSalt }
+      );
+      newPrf = r.prfOutput;
+    }
     const kek = await kekFromPRF(newPrf);
     newPrf.fill(0);
     const wrapped = wrapWithKEK(vaultPriv, kek);
@@ -301,7 +338,7 @@ async function passkeyRegister(sessionToken, label) {
     wrappedPrivB64 = bytesToB64(wrapped);
   } catch (e) {
     vaultPriv.fill(0);
-    throw new Error('This passkey does not support encryption (PRF). ' + (e.message || ''));
+    throw new Error('Could not verify encryption (PRF) support on the new passkey. ' + (e.message || ''));
   }
   vaultPriv.fill(0);
 

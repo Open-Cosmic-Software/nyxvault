@@ -2,6 +2,37 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.2.1] — 2026-07-11
+
+### 🐛 Passkey fixes (verified end-to-end with a CDP virtual authenticator)
+
+- **Fixed: www origin broke every passkey ceremony.** `www.nyxvault.org` served
+  the app directly, but the server only accepted `https://nyxvault.org` as the
+  WebAuthn origin. A ceremony started on the www URL passes in the browser
+  (rpID suffix rule) and then **always fails server-side verification** — on
+  every Chromium browser (Edge, Opera, Chrome …). The server now accepts both
+  apex and www origins, and Caddy 301-redirects www → apex so there is a single
+  canonical origin.
+- **PRF is now evaluated during `create()`.** Modern Chromium returns
+  `prf.results` at registration time, which removes one whole extra passkey
+  prompt. The separate `get()` ceremony remains as a fallback for
+  authenticators that only evaluate PRF on assertion.
+- **Early, clear PRF-capability error.** If the authenticator reports
+  `prf.enabled === false` at creation (e.g. some Windows Hello setups),
+  registration now fails immediately with an actionable message (use a phone
+  passkey via QR code or a security key) instead of a confusing late failure.
+- **Real error messages.** `create()`/`get()` exceptions are no longer swallowed
+  into a generic “cancelled” message — DOMException names (`SecurityError`,
+  `InvalidStateError`, …) are surfaced so failures are diagnosable.
+- **No more bogus 404 during registration.** The fallback PRF `get()` on a
+  freshly created (not yet persisted) credential no longer calls
+  `/api/webauthn/auth/verify`, which could only ever answer 404.
+
+Verified: full register → upload → download → decrypt flow, including a second
+passkey (unwrap-with-existing + re-wrap) and multi-credential
+`prf.evalByCredential` decryption, via Chromium's virtual authenticator
+(`hasPrf: true`), plus passphrase-mode CLI regression (nyx-upload/nyx-decrypt).
+
 ## [2.2.0] — 2026-07-11
 
 ### 🔑 Passkey encryption, redesigned (envelope encryption)

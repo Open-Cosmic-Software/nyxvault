@@ -37,6 +37,20 @@ const VT_API_KEY = process.env.VT_API_KEY || '';
 const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'nyxvault.org';
 const WEBAUTHN_RP_NAME = process.env.WEBAUTHN_RP_NAME || 'NyxVault';
 const WEBAUTHN_ORIGIN = process.env.WEBAUTHN_ORIGIN || 'https://nyxvault.org';
+// Accept both the apex and www origins: Caddy serves the app on both, and a
+// ceremony started on www.nyxvault.org is valid for rpID nyxvault.org — but
+// clientDataJSON.origin then reads https://www.nyxvault.org, which a single
+// expectedOrigin string would reject. (This broke passkeys on every Chromium
+// browser for anyone who opened the www URL.)
+const WEBAUTHN_ORIGINS = (() => {
+  const set = new Set([WEBAUTHN_ORIGIN]);
+  try {
+    const u = new URL(WEBAUTHN_ORIGIN);
+    if (u.hostname.startsWith('www.')) set.add(u.protocol + '//' + u.hostname.slice(4));
+    else set.add(u.protocol + '//www.' + u.hostname);
+  } catch { /* keep single origin */ }
+  return [...set];
+})();
 
 const {
   generateRegistrationOptions,
@@ -927,7 +941,7 @@ app.post('/api/webauthn/register/verify', authWeb, async (req, res) => {
     const verification = await verifyRegistrationResponse({
       response: credential,
       expectedChallenge,
-      expectedOrigin: WEBAUTHN_ORIGIN,
+      expectedOrigin: WEBAUTHN_ORIGINS,
       expectedRPID: WEBAUTHN_RP_ID,
       requireUserVerification: false
     });
@@ -1003,7 +1017,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
     const verification = await verifyAuthenticationResponse({
       response: credential,
       expectedChallenge,
-      expectedOrigin: WEBAUTHN_ORIGIN,
+      expectedOrigin: WEBAUTHN_ORIGINS,
       expectedRPID: WEBAUTHN_RP_ID,
       requireUserVerification: false,
       credential: {
@@ -1024,7 +1038,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nyxvault', version: '2.2.0', uptime: process.uptime() });
+  res.json({ status: 'ok', service: 'nyxvault', version: '2.2.1', uptime: process.uptime() });
 });
 
 // ── Session cleanup (every 30min) ─────────────────────────
