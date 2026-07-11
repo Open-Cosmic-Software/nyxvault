@@ -7,6 +7,7 @@ storage/
 *.bak
 *.bak-*
 public/landing.html
+public/landing.js
 landing.nyx
 .DS_Store
 npm-debug.log*
