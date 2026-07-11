@@ -17,6 +17,7 @@ Encrypt in your browser. Share a link. The server never sees your data.
 ## ✨ Features
 
 - 🔐 **End-to-end encryption** — files are encrypted in the browser/CLI with Argon2id + XSalsa20-Poly1305 (TweetNaCl). The server only ever stores ciphertext.
+- 🔑 **Passkey encryption (WebAuthn PRF)** — register a passkey (Face ID / Touch ID / security key) once and every upload is encrypted *to your passkeys*: no passphrase to remember, no passphrase to leak. Envelope encryption means every registered passkey can open every passkey-encrypted file. See [Passkey architecture](#-passkey-architecture-envelope-encryption).
 - 🛡️ **Integrity-protected chunks (NYX3)** — every chunk embeds its index and a final-chunk marker; the header is authenticated with HMAC-SHA256. Reordering, truncating, or tampering with chunks is detected immediately.
 - 🧠 **Zero-knowledge** — your passphrase and the plaintext never leave your device. Not the filename, not the content type, nothing.
 - 🖼️ **In-browser preview** — images, video, audio, PDF and text are previewed right after decryption, before you download.
@@ -49,10 +50,14 @@ Edit `.env` and set **your own** values:
 ```ini
 PORT=3870
 API_KEY=<generate a long random string>
-WEB_PASSWORD=<your web UI password>
-SESSION_SECRET=<generate a long random string>
+WEB_PASSWORD=<your web UI password, or an argon2 hash starting with $argon2>
 MAX_FILE_SIZE_MB=100
-VT_API_KEY=        # optional, enables VirusTotal scanning
+VT_API_KEY=              # optional, enables VirusTotal scanning
+
+# Passkeys (WebAuthn) — must match the public hostname you serve the app on
+WEBAUTHN_RP_ID=vault.example.com
+WEBAUTHN_RP_NAME=NyxVault
+WEBAUTHN_ORIGIN=https://vault.example.com
 ```
 
 Generate random secrets quickly:
@@ -71,6 +76,41 @@ node server.js
 ```
 
 The server binds to `127.0.0.1` — put a reverse proxy (Caddy, nginx, Traefik) with TLS in front of it for public access.
+
+### systemd example
+
+```ini
+[Unit]
+Description=NyxVault - E2E Encrypted File Sharing
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nyxvault
+ExecStart=/usr/bin/node /opt/nyxvault/server.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Caddy example
+
+```caddyfile
+www.vault.example.com {
+	# WebAuthn rpID/origin should be ONE canonical origin — redirect www to apex.
+	redir https://vault.example.com{uri} permanent
+}
+
+vault.example.com {
+	request_body {
+		max_size 2GB
+	}
+	reverse_proxy 127.0.0.1:3870
+}
+```
 
 ## 📖 Usage
 
@@ -100,6 +140,51 @@ node nyx-decrypt.js encrypted.bin 'my strong passphrase' output.pdf
 
 Full CLI and HTTP API reference: **[API.md](API.md)**.
 
+## 🔑 Passkey architecture (envelope encryption)
+
+Since v2.2, NyxVault can encrypt files *to your passkeys* using the WebAuthn
+PRF (`hmac-secret`) extension — no passphrase involved. The design is classic
+envelope encryption:
+
+```
+            REGISTRATION (once per passkey, in the browser)
+┌─────────────────────────────────────────────────────────────┐
+│ first passkey ever:  browser generates vault X25519 keypair    │
+│   • vault PUBLIC key  → stored on the server (not secret)      │
+│   • vault PRIVATE key → wrapped per passkey (below), never     │
+│     stored in plaintext anywhere                                │
+│                                                                 │
+│ per passkey: PRF(salt_i) → KEK_i = HKDF(prf_output)             │
+│   wrapped_privkey_i = secretbox(vault_priv, KEK_i)              │
+└─────────────────────────────────────────────────────────────┘
+
+            UPLOAD (no passkey prompt needed!)
+┌─────────────────────────────────────────────────────────────┐
+│ random FEK (32 B) encrypts the file as a normal NYX3 blob      │
+│ wrapped_fek = sealed_box(FEK → vault public key)               │
+│ server stores blob + wrapped_fek — can open neither            │
+└─────────────────────────────────────────────────────────────┘
+
+            DOWNLOAD (any registered passkey)
+┌─────────────────────────────────────────────────────────────┐
+│ passkey ceremony → PRF output → KEK_i → unwrap vault priv key  │
+│ open sealed box → FEK → decrypt NYX3 blob. All client-side.    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Key properties:
+
+- **Every passkey opens every passkey-file** — the vault private key is wrapped
+  once per passkey, so passkeys are interchangeable at decrypt time.
+- **Uploads never prompt** — sealing to a public key needs no ceremony. The CLI
+  and API can upload passkey-encrypted files too (`key_mode=passkey`).
+- **The server is blind** — it stores the vault *public* key, per-passkey PRF
+  salts, wrapped private keys, and sealed FEKs. None of these reveal plaintext.
+- **Deleting the last passkey** permanently orphans all passkey-encrypted files
+  (the UI warns loudly and requires explicit confirmation).
+- Files can still be made **passphrase-only** per upload (“use a passphrase
+  instead”), and passphrase files work exactly as before.
+
 ## 🔒 Security Model
 
 | Property | How |
@@ -108,6 +193,7 @@ Full CLI and HTTP API reference: **[API.md](API.md)**.
 | **Where** | 100% client-side — browser or CLI. The server receives only ciphertext. |
 | **Filename privacy** | The original filename and content type are themselves encrypted; the server stores `redacted`. |
 | **Passphrase** | Never transmitted. Not stored. Not recoverable. |
+| **Passkeys** | WebAuthn PRF output never leaves the browser (client extension results are stripped before anything is sent). The vault private key exists only wrapped under per-passkey KEKs; file keys only sealed to the vault public key. |
 | **VirusTotal** | **Opt-in only** — never automatic. The SHA-256 hash is computed client-side and shown locally; it's sent to VirusTotal only on explicit user click. The file is never uploaded to VT. A clear privacy note warns that even a hash query reveals the file's existence — so users can skip it for sensitive, unique files. |
 | **Burn after reading** | The server only deletes the file after the client confirms a *successful* decryption, so a wrong passphrase can never destroy a file. The ciphertext blob is single-use (a server-side lock refuses a second fetch) and is overwritten with random bytes before unlink (best-effort secure delete). |
 | **Transport** | Bind to localhost + TLS-terminating reverse proxy. Strict CSP (`script-src 'self' 'wasm-unsafe-eval'` — no inline scripts; plus `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`), `X-Frame-Options: DENY`. PDF previews run in a sandboxed iframe. |
@@ -126,6 +212,13 @@ The plaintext, the filename, the content type, or your passphrase.
 Node.js · Express · better-sqlite3 · TweetNaCl · hash-wasm (Argon2id) · multer · qrcode-generator. No build step, no framework — just open `server.js`.
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
+
+## 🧪 Testing
+
+The passkey path is end-to-end tested with Playwright + the Chrome DevTools
+`WebAuthn.addVirtualAuthenticator` API (CTAP2, internal transport, PRF
+enabled): register → upload (21 MB) → download → decrypt → byte-for-byte hash
+comparison, plus a passphrase-mode UI regression.
 
 ## 📄 License
 

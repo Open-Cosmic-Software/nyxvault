@@ -312,6 +312,7 @@ let selectedFile = null;
 let vaultPubkey = null;         // vault public key (base64) for envelope encryption
 let passkeyRegistered = false;  // at least one passkey exists
 let usePassphraseUpload = false; // explicit "use passphrase instead" toggle
+let serverMaxFileMB = 100;      // server upload cap (from /api/settings)
 
 // ── DOM refs ──────────────────────────────────────────────
 const loginOverlay = document.getElementById('loginOverlay');
@@ -343,6 +344,72 @@ const fileTable = document.getElementById('fileTable');
 
 const toastContainer = document.getElementById('toastContainer');
 
+// ── Custom dialogs (CSP-safe replacement for prompt/confirm) ─────
+function nyxDialog({ title, message, input, inputType = 'text', inputValue = '', placeholder = '', okLabel = 'OK', cancelLabel = 'Cancel', danger = false }) {
+  return new Promise((resolve) => {
+    const root = document.getElementById('nyxModalRoot');
+    const overlay = document.createElement('div');
+    overlay.className = 'nyx-dialog-overlay';
+    const box = document.createElement('div');
+    box.className = 'nyx-dialog';
+
+    const h = document.createElement('h3');
+    h.textContent = title;
+    box.appendChild(h);
+    if (message) {
+      const p = document.createElement('p');
+      p.textContent = message;
+      box.appendChild(p);
+    }
+    let inputEl = null;
+    if (input) {
+      inputEl = document.createElement('input');
+      inputEl.type = inputType;
+      inputEl.value = inputValue;
+      inputEl.placeholder = placeholder;
+      inputEl.autocomplete = 'off';
+      box.appendChild(inputEl);
+    }
+    const actions = document.createElement('div');
+    actions.className = 'nyx-dialog-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-cancel';
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = cancelLabel;
+    const okBtn = document.createElement('button');
+    okBtn.className = danger ? 'btn-danger' : 'btn-primary';
+    okBtn.type = 'button';
+    okBtn.textContent = okLabel;
+    actions.append(cancelBtn, okBtn);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    root.appendChild(overlay);
+
+    function close(result) {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    }
+    function ok() { close(input ? inputEl.value : true); }
+    function cancel() { close(input ? null : false); }
+    function onKey(e) {
+      if (e.key === 'Escape') cancel();
+      else if (e.key === 'Enter' && (input ? document.activeElement === inputEl : true)) ok();
+    }
+    okBtn.addEventListener('click', ok);
+    cancelBtn.addEventListener('click', cancel);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cancel(); });
+    document.addEventListener('keydown', onKey);
+    if (inputEl) inputEl.focus(); else okBtn.focus();
+  });
+}
+function nyxConfirm(title, message, opts = {}) {
+  return nyxDialog({ title, message, okLabel: opts.okLabel || 'Confirm', danger: !!opts.danger });
+}
+function nyxPrompt(title, message, opts = {}) {
+  return nyxDialog({ title, message, input: true, inputType: opts.type || 'text', inputValue: opts.value || '', placeholder: opts.placeholder || '', okLabel: opts.okLabel || 'OK' });
+}
+
 // ── Toast ─────────────────────────────────────────────────
 function toast(message, type = 'info') {
   const el = document.createElement('div');
@@ -363,8 +430,8 @@ function formatBytes(bytes) {
 
 function formatDate(dateStr) {
   const d = new Date(dateStr + 'Z');
-  return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' }) +
-    ' ' + d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }) +
+    ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
 // ── Auth ──────────────────────────────────────────────────
@@ -386,6 +453,11 @@ async function loadPasskeySettings() {
     const s = await (await fetch('/api/settings')).json();
     vaultPubkey = s.vault_pubkey || null;
     passkeyRegistered = !!s.passkey_registered;
+    if (s.max_file_size_mb) {
+      serverMaxFileMB = s.max_file_size_mb;
+      const hint = document.getElementById('dropzoneHint');
+      if (hint) hint.textContent = 'Click to browse. Encryption happens locally before anything leaves your device. Max ' + (serverMaxFileMB >= 1024 ? (serverMaxFileMB / 1024).toFixed(0) + ' GB' : serverMaxFileMB + ' MB') + '.';
+    }
     renderPasskeyUI();
     loadPasskeyList();
   } catch { /* settings are optional; ignore */ }
@@ -454,8 +526,14 @@ function renderPasskeyList(passkeys, count) {
     tr.dataset.id = pk.id;
 
     const nameTd = document.createElement('td');
-    nameTd.textContent = pk.label || 'Passkey';
-    nameTd.title = pk.cred_id_short + '…';
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'pk-name';
+    nameSpan.textContent = '🔑 ' + (pk.label || 'Passkey');
+    const chip = document.createElement('span');
+    chip.className = 'pk-chip';
+    chip.textContent = pk.cred_id_short + '…';
+    chip.title = 'Credential ID (truncated)';
+    nameTd.append(nameSpan, ' ', chip);
 
     const createdTd = document.createElement('td'); createdTd.className = 'meta';
     createdTd.textContent = pk.created_at ? formatDate(pk.created_at) : '—';
@@ -473,7 +551,7 @@ function renderPasskeyList(passkeys, count) {
 }
 
 async function renamePasskey(id) {
-  const name = prompt('New name for this passkey:');
+  const name = await nyxPrompt('Rename passkey', 'Choose a new name for this passkey.', { placeholder: 'e.g. iPhone, Laptop', okLabel: 'Rename' });
   if (!name || !name.trim()) return;
   try {
     const res = await api('/api/passkeys/' + id, {
@@ -492,7 +570,9 @@ async function deletePasskey(id) {
     if (res.status === 409) {
       const info = await res.json();
       if (info.error === 'last_passkey') {
-        const ok = confirm('⚠️ ' + info.message + '\n\nAre you absolutely sure? This cannot be undone.');
+        const ok = await nyxConfirm('⚠️ Delete your LAST passkey?',
+          'This will make ' + (info.affected_files ?? 'all') + ' passkey-encrypted file(s) permanently UNRECOVERABLE. The vault key cannot be unwrapped without a passkey.\n\nThis cannot be undone.',
+          { okLabel: 'Delete forever', danger: true });
         if (!ok) return;
         res = await api('/api/passkeys/' + id + '?confirm=1', { method: 'DELETE' });
       }
@@ -515,7 +595,7 @@ async function registerPasskey() {
   // and once to verify its PRF and wrap the vault key. Warn the user.
   toast('You may be prompted a few times: to verify an existing passkey (if any), create the new one, and confirm encryption support.', 'info');
   try {
-    const label = prompt('Name this passkey (e.g. "iPhone", "Laptop"):', navigator.platform || 'Passkey');
+    const label = await nyxPrompt('Name this passkey', 'Pick a name so you can recognise this passkey later.', { value: navigator.platform || 'Passkey', placeholder: 'e.g. iPhone, Laptop', okLabel: 'Continue' });
     if (label === null) { return; }
     const res = await window.NyxPasskey.register(sessionToken, (label && label.trim()) || 'Passkey');
     toast(res.first ? 'First passkey registered — passkey encryption is now active! 🔑' : 'Passkey registered! 🔑', 'success');
@@ -524,7 +604,7 @@ async function registerPasskey() {
   } catch (err) {
     toast('Passkey registration failed: ' + err.message, 'error');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '🔑 Register Passkey'; }
+    if (btn) { btn.disabled = false; btn.textContent = '＋ Register Passkey'; }
   }
 }
 
@@ -643,15 +723,15 @@ function renderFiles(files, total) {
   const rows = [];
 
   for (const f of files) {
-    const placeholder = f.original_name || '🔒 encrypted';
+    const placeholder = (f.original_name && f.original_name !== 'redacted') ? f.original_name : '🔒 encrypted';
     const tr = document.createElement('tr');
     tr.dataset.id = f.id;
     tr.dataset.token = f.download_token;
     tr.dataset.filenameEnc = f.filename_enc || '';
-    tr.dataset.originalName = f.original_name || 'encrypted_file';
+    tr.dataset.originalName = (f.original_name && f.original_name !== 'redacted') ? f.original_name : 'encrypted_file';
 
     const nameTd = document.createElement('td');
-    nameTd.className = 'filename';
+    nameTd.className = 'filename enc-placeholder';
     nameTd.title = placeholder;
     nameTd.textContent = '📄 ' + placeholder;
 
@@ -682,6 +762,7 @@ function renderFiles(files, total) {
           if (myToken !== filenameDecryptToken) return;
           nameTd.title = name;
           nameTd.textContent = '📄 ' + name;
+          nameTd.classList.remove('enc-placeholder');
         } catch { /* keep placeholder */ }
         // Yield to the UI thread between heavy Argon2 derivations.
         await new Promise(r => setTimeout(r, 0));
@@ -704,12 +785,6 @@ fileListBody.addEventListener('click', (e) => {
   else if (act === 'delete') deleteFile(id);
 });
 
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
-}
-
 // ── Upload ────────────────────────────────────────────────
 function handleFileDrop(e) {
   e.preventDefault();
@@ -721,6 +796,12 @@ function handleFileDrop(e) {
 }
 
 function selectFile(file) {
+  // Encrypted blob is slightly larger than the plaintext (~0.002%) — a small
+  // margin keeps the client check honest against the server-side cap.
+  if (file.size > serverMaxFileMB * 1024 * 1024 * 0.99) {
+    toast('File too large — this server accepts up to ' + serverMaxFileMB + ' MB.', 'error');
+    return;
+  }
   selectedFile = file;
   selectedFileName.textContent = file.name;
   selectedFileSize.textContent = formatBytes(file.size);
@@ -812,7 +893,8 @@ async function uploadFile() {
     formData.append('file', new Blob([encryptedData]), 'encrypted');
     formData.append('filename_enc', filenameEnc);
     formData.append('content_type_enc', contentTypeEnc);
-    formData.append('original_name', selectedFile.name);
+    // NOTE: the plaintext filename is deliberately NOT sent — zero-knowledge
+    // means the server never sees it, not even in transit.
     if (pkActive) {
       formData.append('key_mode', 'passkey');
       formData.append('wrapped_fek', wrappedFekB64);
@@ -832,10 +914,12 @@ async function uploadFile() {
         }
       });
       xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(JSON.parse(xhr.responseText));
+        let body = null;
+        try { body = JSON.parse(xhr.responseText); } catch { /* non-JSON (proxy error page) */ }
+        if (xhr.status >= 200 && xhr.status < 300 && body) {
+          resolve(body);
         } else {
-          reject(new Error(JSON.parse(xhr.responseText).error || 'Upload failed'));
+          reject(new Error((body && body.error) || 'Upload failed (HTTP ' + xhr.status + ')'));
         }
       });
       xhr.addEventListener('error', () => reject(new Error('Network error')));
@@ -904,9 +988,9 @@ async function downloadFile(id) {
   let decrypted = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (!pw) {
-      pw = prompt(attempt === 0
-        ? 'Enter the passphrase for this file:'
-        : 'Wrong passphrase — try again:');
+      pw = await nyxPrompt('Decrypt file', attempt === 0
+        ? 'Enter the passphrase for this file.'
+        : 'Wrong passphrase — try again.', { type: 'password', placeholder: 'Passphrase', okLabel: 'Decrypt' });
       if (!pw) { toast('Cancelled', 'info'); return; }
     }
     try {
@@ -955,7 +1039,7 @@ async function downloadFile(id) {
 
 // ── Delete ────────────────────────────────────────────────
 async function deleteFile(id) {
-  if (!confirm('Delete this file permanently?')) return;
+  if (!(await nyxConfirm('Delete file?', 'This permanently deletes the encrypted file from the server. Existing share links will stop working.', { okLabel: 'Delete', danger: true }))) return;
 
   try {
     const res = await api(`/api/files/${id}`, { method: 'DELETE' });

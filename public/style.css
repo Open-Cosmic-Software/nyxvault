@@ -1686,3 +1686,253 @@ body.cosmic-bg-img::after {
   transition: opacity 0.15s;
 }
 #toggleUploadPw:hover { opacity: 1; }
+
+/* ════════════════════════════════════════════════════════ */
+/* v2.3.0 — Admin Redesign: cards, dialogs, table polish 🦞  */
+/* ════════════════════════════════════════════════════════ */
+
+/* Admin cards — the main structural unit of the admin page */
+.admin-card {
+  position: relative;
+  background: linear-gradient(160deg, rgba(28, 28, 53, 0.72), rgba(20, 20, 37, 0.82));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 24px;
+  margin: 18px 0;
+  backdrop-filter: blur(10px);
+  transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition);
+  z-index: 1;
+}
+.admin-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 6px 30px rgba(168, 85, 247, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.admin-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.admin-card-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.admin-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  font-size: 1.25rem;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(232, 121, 168, 0.14), rgba(168, 85, 247, 0.14));
+  border: 1px solid rgba(168, 85, 247, 0.22);
+  box-shadow: 0 0 18px rgba(168, 85, 247, 0.12);
+  flex: 0 0 auto;
+}
+.admin-card-head h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: var(--gradient-main);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.admin-card-sub {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  max-width: 560px;
+}
+.admin-warn {
+  color: #ffb4b4;
+  font-size: 0.84rem;
+  margin-top: 8px;
+}
+.passkey-upload-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin: 6px 0;
+}
+
+/* Ghost button (secondary actions, e.g. Register Passkey) */
+.btn-ghost {
+  background: rgba(168, 85, 247, 0.08);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  color: var(--text);
+  padding: 9px 18px;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+.btn-ghost:hover {
+  background: rgba(168, 85, 247, 0.18);
+  border-color: rgba(168, 85, 247, 0.6);
+  box-shadow: 0 0 18px rgba(168, 85, 247, 0.25);
+  transform: translateY(-1px);
+}
+.btn-ghost:disabled { opacity: 0.55; cursor: not-allowed; transform: none; box-shadow: none; }
+
+/* Horizontal scroll wrapper keeps tables usable on small screens */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* Passkey table */
+.passkey-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+.passkey-table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+.passkey-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--transition);
+}
+.passkey-table tbody tr:last-child td { border-bottom: none; }
+.passkey-table tbody tr:hover td { background: rgba(168, 85, 247, 0.05); }
+.passkey-table .pk-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+.passkey-table .pk-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--cyan);
+  background: rgba(103, 232, 249, 0.08);
+  border: 1px solid rgba(103, 232, 249, 0.2);
+}
+.th-actions { text-align: right; }
+.passkey-table .actions, .file-table .actions { text-align: right; white-space: nowrap; }
+
+/* File count pill */
+.count {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  background: rgba(168, 85, 247, 0.1);
+  border: 1px solid rgba(168, 85, 247, 0.2);
+  padding: 4px 12px;
+  border-radius: 999px;
+  align-self: center;
+}
+
+/* Custom dialog (replaces native prompt/confirm — CSP-safe, cosmic style) */
+.nyx-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 8, 18, 0.7);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.18s ease;
+  padding: 20px;
+}
+.nyx-dialog {
+  background: linear-gradient(160deg, #1d1d38, #141426);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55), 0 0 40px rgba(168, 85, 247, 0.12);
+  padding: 24px;
+  width: 100%;
+  max-width: 420px;
+  animation: modalSlideUp 0.22s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.nyx-dialog h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.nyx-dialog p {
+  font-size: 0.86rem;
+  color: var(--text-muted);
+  line-height: 1.55;
+  margin-bottom: 16px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.nyx-dialog input {
+  width: 100%;
+  padding: 11px 14px;
+  background: rgba(13, 13, 26, 0.8);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 0.92rem;
+  outline: none;
+  margin-bottom: 16px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.nyx-dialog input:focus {
+  border-color: rgba(168, 85, 247, 0.7);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.15);
+}
+.nyx-dialog-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+.nyx-dialog-actions .btn-primary { width: auto; padding: 10px 22px; font-size: 0.88rem; }
+.nyx-dialog-actions .btn-cancel { padding: 10px 18px; }
+.nyx-dialog .btn-danger {
+  background: linear-gradient(135deg, #f87171, #d946ef);
+  border: none;
+  color: #fff;
+  padding: 10px 22px;
+  border-radius: 10px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.nyx-dialog .btn-danger:hover {
+  box-shadow: 0 0 22px rgba(248, 113, 113, 0.4);
+  transform: translateY(-1px);
+}
+
+/* File table refinements */
+.file-table td { vertical-align: middle; }
+.file-table .filename { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-icon { transition: all 0.18s ease; }
+.btn-icon:active { transform: scale(0.94); }
+
+/* Mobile behaviour */
+@media (max-width: 700px) {
+  .admin-card { padding: 16px 14px; }
+  .admin-card-head { flex-direction: column; align-items: stretch; }
+  .admin-card-head .btn-ghost { align-self: flex-start; }
+  .file-table .filename { max-width: 180px; }
+  .nyx-dialog { max-width: 100%; }
+  .file-table th, .file-table td, .passkey-table th, .passkey-table td { padding: 8px 6px; }
+}
+
+/* Download page: gentle refinements */
+.dl-card { animation: modalSlideUp 0.3s cubic-bezier(0.34, 1.3, 0.64, 1); }
+.dl-hash { overflow-wrap: anywhere; }
+.dl-section { transition: opacity 0.25s ease; }
+#passkeyDecryptBtn { margin-top: 4px; }
+.toast-container { max-width: min(340px, calc(100vw - 32px)); }
+.toast { box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
+.file-table .filename.enc-placeholder { opacity: 0.55; font-style: italic; }
+.file-table .actions .btn-icon { margin-left: 6px; }

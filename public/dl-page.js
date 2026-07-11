@@ -183,7 +183,7 @@
     }
     fileMeta = meta;
     $('dlFileName').textContent = meta.original_name || 'Encrypted File';
-    $('dlFileMeta').textContent = fmtSize(meta.size_bytes) + ' · ' + new Date(meta.upload_date).toLocaleDateString();
+    $('dlFileMeta').textContent = fmtSize(meta.size_bytes) + ' · ' + new Date(meta.upload_date + 'Z').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
     if (meta.burn_after_read) { $('burnWarn').style.display = 'flex'; }
     // Passkey-encrypted file: swap the passphrase form for a passkey button.
     if (meta.key_mode === 'passkey') {

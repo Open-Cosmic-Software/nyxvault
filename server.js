@@ -17,6 +17,10 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
+const VERSION = (() => {
+  try { return require('./package.json').version; } catch { return 'unknown'; }
+})();
+
 // Security headers
 app.use((req, res, next) => {
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
@@ -25,12 +29,17 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
 });
-app.disable('x-powered-by');
 const PORT = parseInt(process.env.PORT) || 3870;
 const API_KEY = process.env.API_KEY;
 const WEB_PASSWORD = process.env.WEB_PASSWORD;
-const SESSION_SECRET = process.env.SESSION_SECRET;
-const MAX_FILE_SIZE = (parseInt(process.env.MAX_FILE_SIZE_MB) || 100) * 1024 * 1024;
+const MAX_FILE_SIZE_MB = parseInt(process.env.MAX_FILE_SIZE_MB) || 100;
+const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
+
+// Fail fast on missing critical config — a vault without auth is not a vault.
+if (!API_KEY || !WEB_PASSWORD) {
+  console.error('FATAL: API_KEY and WEB_PASSWORD must be set (see .env.example).');
+  process.exit(1);
+}
 const VT_API_KEY = process.env.VT_API_KEY || '';
 // WebAuthn / passkey configuration. RP ID + origin must match the public
 // hostname (Caddy) — never localhost, or the browser rejects the ceremony.
@@ -67,8 +76,25 @@ const DL_PAGE_HTML = (() => {
   } catch { return null; }
 })();
 
-// Simple in-memory cache for VirusTotal hash lookups (1h TTL)
+// Simple in-memory cache for VirusTotal hash lookups (1h TTL, bounded)
 const vtCache = new Map();
+const VT_CACHE_MAX = 500;
+function vtCacheSet(hash, entry) {
+  if (vtCache.size >= VT_CACHE_MAX) {
+    // Evict the oldest entry (Map preserves insertion order).
+    const oldest = vtCache.keys().next().value;
+    if (oldest !== undefined) vtCache.delete(oldest);
+  }
+  vtCache.set(hash, entry);
+}
+
+// Defensive JSON parse for the passkey transports column (corrupt rows must
+// never turn into a 500 on an otherwise healthy endpoint).
+function parseTransports(raw) {
+  if (!raw) return undefined;
+  try { const t = JSON.parse(raw); return Array.isArray(t) ? t : undefined; }
+  catch { return undefined; }
+}
 
 // Parse a human duration like "30m", "1h", "24h", "7d", "30d" into milliseconds.
 function parseDuration(str) {
@@ -221,7 +247,9 @@ const stmtInsert = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtMarkDownloaded = db.prepare(`UPDATE files SET downloaded_at = datetime('now') WHERE id = ?`);
-const stmtGetAll = db.prepare(`SELECT * FROM files ORDER BY upload_date DESC`);
+// Atomic single-use lock for burn-after-reading blobs: only the request that
+// actually flips downloaded_at from NULL wins.
+const stmtClaimBurnRead = db.prepare(`UPDATE files SET downloaded_at = datetime('now') WHERE id = ? AND downloaded_at IS NULL`);
 // Pagination + lazy-expiry helpers (treat NULL expires_at as never-expiring).
 const stmtGetExpired = db.prepare(`SELECT id, download_token FROM files WHERE expires_at IS NOT NULL AND expires_at < ?`);
 const stmtCountActive = db.prepare(`SELECT COUNT(*) AS c FROM files WHERE expires_at IS NULL OR expires_at >= ?`);
@@ -492,8 +520,7 @@ app.get('/api/files', authAny, (req, res) => {
     const now = new Date().toISOString();
     const expired = stmtGetExpired.all(now);
     for (const f of expired) {
-      const filePath = path.join(STORAGE_DIR, f.download_token);
-      if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch {} }
+      secureDelete(path.join(STORAGE_DIR, f.download_token));
       stmtDelete.run(f.id);
     }
 
@@ -552,7 +579,7 @@ app.delete('/api/files/:id', authAny, (req, res) => {
     if (!file) return res.status(404).json({ error: 'File not found' });
 
     const filePath = path.join(STORAGE_DIR, file.download_token);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    secureDelete(filePath);
     stmtDelete.run(file.id);
 
     console.log(`[DELETE] File #${file.id} (token:${file.download_token.slice(0, 8)}...)`);
@@ -607,7 +634,7 @@ app.get('/api/vt/:hash', vtLimiter, async (req, res) => {
 
     if (vtRes.status === 404) {
       const data = { not_found: true };
-      vtCache.set(hash, { data, expires: Date.now() + 60 * 60 * 1000 });
+      vtCacheSet(hash, { data, expires: Date.now() + 60 * 60 * 1000 });
       return res.json(data);
     }
     if (vtRes.status === 401 || vtRes.status === 403) {
@@ -630,7 +657,7 @@ app.get('/api/vt/:hash', vtLimiter, async (req, res) => {
       total: (stats.malicious||0) + (stats.suspicious||0) + (stats.harmless||0) + (stats.undetected||0) + (stats.timeout||0),
       permalink: 'https://www.virustotal.com/gui/file/' + hash
     };
-    vtCache.set(hash, { data, expires: Date.now() + 60 * 60 * 1000 });
+    vtCacheSet(hash, { data, expires: Date.now() + 60 * 60 * 1000 });
     return res.json(data);
   } catch (err) {
     console.error('VT lookup error:', err.message);
@@ -671,7 +698,7 @@ app.get('/api/dl/:token/meta', downloadLimiter, (req, res) => {
         cred_id: p.cred_id,
         prf_salt: p.prf_salt,
         wrapped_privkey: p.wrapped_privkey,
-        transports: p.transports ? JSON.parse(p.transports) : undefined
+        transports: parseTransports(p.transports)
       })) : undefined
     });
   } catch (err) {
@@ -704,10 +731,10 @@ app.get('/api/dl/:token/blob', downloadLimiter, (req, res) => {
     //  verified client-side decrypt, so a failed/aborted fetch isn't punished
     //  beyond a single retry being blocked.)
     if (file.burn_after_read) {
-      if (file.downloaded_at) {
+      const claimed = stmtClaimBurnRead.run(file.id);
+      if (claimed.changes === 0) {
         return res.status(410).json({ error: 'This burn-after-reading file has already been retrieved.' });
       }
-      stmtMarkDownloaded.run(file.id);
     }
 
     res.setHeader('Content-Type', 'application/octet-stream');
@@ -755,6 +782,7 @@ app.get('/api/settings', (req, res) => {
       passkey_mode: passkeyMode,
       passkey_registered: passkeyCount > 0,
       passkey_count: passkeyCount,
+      max_file_size_mb: MAX_FILE_SIZE_MB,
       // Vault public key (base64) for envelope encryption. Anyone (web UI, CLI,
       // agent API) can seal a FEK to it; only a registered passkey can unseal.
       vault_pubkey: getSetting('vault_pubkey') || null
@@ -886,7 +914,7 @@ app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
       attestationType: 'none',
       excludeCredentials: existing.map(p => ({
         id: p.cred_id,
-        transports: p.transports ? JSON.parse(p.transports) : undefined
+        transports: parseTransports(p.transports)
       })),
       authenticatorSelection: {
         // 'preferred' (not 'required') for broad platform-authenticator
@@ -913,7 +941,7 @@ app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
         cred_id: p.cred_id,
         prf_salt: p.prf_salt,
         wrapped_privkey: p.wrapped_privkey,
-        transports: p.transports ? JSON.parse(p.transports) : undefined
+        transports: parseTransports(p.transports)
       })) : []
     });
   } catch (err) {
@@ -990,7 +1018,7 @@ app.post('/api/webauthn/auth/options', downloadLimiter, async (req, res) => {
       userVerification: 'preferred',
       allowCredentials: passkeys.map(p => ({
         id: p.cred_id,
-        transports: p.transports ? JSON.parse(p.transports) : undefined
+        transports: parseTransports(p.transports)
       }))
     });
     const flowId = crypto.randomBytes(16).toString('hex');
@@ -1024,7 +1052,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
         id: dbCred.cred_id,
         publicKey: new Uint8Array(Buffer.from(dbCred.public_key, 'base64')),
         counter: dbCred.counter,
-        transports: dbCred.transports ? JSON.parse(dbCred.transports) : undefined
+        transports: parseTransports(dbCred.transports)
       }
     });
     if (!verification.verified) return res.status(400).json({ error: 'Passkey authentication failed' });
@@ -1038,7 +1066,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nyxvault', version: '2.2.1', uptime: process.uptime() });
+  res.json({ status: 'ok', service: 'nyxvault', version: VERSION, uptime: process.uptime() });
 });
 
 // ── Session cleanup (every 30min) ─────────────────────────
@@ -1052,18 +1080,29 @@ setInterval(() => {
 // ── Expired files cleanup (every 30min) ───────────────────
 setInterval(() => {
   try {
-    const files = stmtGetAll.all();
     const now = new Date().toISOString();
-    let cleaned = 0;
-    for (const f of files) {
-      if (f.expires_at && f.expires_at < now) {
-        const filePath = path.join(STORAGE_DIR, f.download_token);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        stmtDelete.run(f.id);
-        cleaned++;
-      }
+    const expired = stmtGetExpired.all(now);
+    for (const f of expired) {
+      secureDelete(path.join(STORAGE_DIR, f.download_token));
+      stmtDelete.run(f.id);
     }
-    if (cleaned > 0) console.log(`[CLEANUP] Removed ${cleaned} expired file(s)`);
+    if (expired.length > 0) console.log(`[CLEANUP] Removed ${expired.length} expired file(s)`);
+
+    // Orphaned multer temp files: aborted uploads leave random-named temp files
+    // (32 hex chars) in the storage dir. Real blobs are 64-hex download tokens.
+    // Remove any non-token file older than 24h.
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const name of fs.readdirSync(STORAGE_DIR)) {
+      if (/^[a-f0-9]{64}$/.test(name)) continue; // real encrypted blob
+      const p = path.join(STORAGE_DIR, name);
+      try {
+        const st = fs.statSync(p);
+        if (st.isFile() && st.mtimeMs < cutoff) {
+          fs.unlinkSync(p);
+          console.log(`[CLEANUP] Removed orphaned temp file ${name}`);
+        }
+      } catch { /* ignore races */ }
+    }
   } catch (err) {
     console.error('Cleanup error:', err);
   }

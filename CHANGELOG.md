@@ -2,6 +2,62 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.3.0] — 2026-07-11
+
+### ✨ Admin UI redesign (cosmic lobster, but tidier)
+
+- The admin page is now organised into three clean glass cards — **Upload**,
+  **Passkeys**, **Your Files** — with consistent headers, icons, subtitles,
+  hover glow and mobile-friendly spacing (tables scroll horizontally on small
+  screens instead of breaking the layout).
+- **Native `prompt()`/`confirm()` are gone.** Renaming a passkey, naming a new
+  one, deleting files and the scary “delete your LAST passkey” confirmation all
+  use a proper cosmic-styled dialog (keyboard: Enter/Escape, click-outside to
+  cancel, danger-styled destructive buttons).
+- Passkey rows show a monospace credential-ID chip next to the name.
+- The passphrase prompt when downloading a foreign-passphrase file from the
+  admin list is a real password dialog now.
+- Download page: entrance animation, hash-line wrapping, minor polish.
+- All dates render in English locale formatting.
+
+### 💪 Upload size
+
+- Investigated the reported ~16 MB encryption limit: **no such limit exists in
+  NyxVault itself** (verified: 21 MB browser passkey E2E and 20 MB CLI
+  round-trips are byte-identical; a 1 GB API upload is on record). Chunked
+  NYX3 encryption (4 MB chunks) has no single-shot secretbox constraint.
+- The web UI now reads the server’s real `MAX_FILE_SIZE_MB` from
+  `GET /api/settings` and rejects oversized files **before** encrypting, with a
+  clear message (previously the failure surfaced only after upload).
+
+### 🔒 Hardening & fixes
+
+- Burn-after-reading single-use lock is now an atomic
+  `UPDATE … WHERE downloaded_at IS NULL` claim (no double-serve window).
+- `secureDelete` (random overwrite before unlink) is now used on **every**
+  deletion path — manual delete, lazy expiry purge and the periodic cleanup —
+  not just burn.
+- Periodic cleanup now uses the indexed expiry query and also removes orphaned
+  multer temp files (aborted uploads) older than 24 h.
+- Corrupt `transports` JSON in a passkey row can no longer 500 an endpoint
+  (defensive parsing everywhere).
+- VirusTotal cache is bounded (500 entries, FIFO eviction).
+- Server fails fast at startup when `API_KEY` / `WEB_PASSWORD` are missing.
+- `/health` reports the real version from `package.json`.
+- Upload XHR no longer hangs the UI on a non-JSON error response (proxy error
+  pages), and reports the HTTP status.
+- The plaintext filename is no longer sent (and ignored) as a form field on
+  web uploads — it never even transits the wire now.
+- Removed dead code: unused `SESSION_SECRET` config, duplicate
+  `x-powered-by` disable, unused SELECT-all statement, unused `escapeHtml`.
+
+### 📚 Docs
+
+- README rewritten: passkey envelope architecture diagram, systemd + Caddy
+  examples, updated env reference, testing notes.
+- API.md: documented `/api/settings`, passkey management, WebAuthn ceremony
+  endpoints, `key_mode` / `wrapped_fek` fields.
+
 ## [2.2.1] — 2026-07-11
 
 ### 🐛 Passkey fixes (verified end-to-end with a CDP virtual authenticator)

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NyxVault 🔐</title>
-  <link rel="stylesheet" href="/style.css?v=1782088331">
+  <title>NyxVault — Admin 🔐</title>
+  <link rel="stylesheet" href="/style.css?v=230">
   <link rel="icon" type="image/png" href="/assets/nyx-logo-256.png">
 </head>
 <body class="cosmic-bg-img">
@@ -57,139 +57,157 @@
         </div>
       </header>
 
-      <!-- Passkey settings + management -->
-      <div class="passkey-settings" id="passkeySettings" style="margin:12px 0; padding:14px 16px; border:1px solid rgba(255,255,255,0.12); border-radius:12px; background:rgba(255,255,255,0.03);">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-          <div style="display:flex; align-items:center; gap:10px;">
-            <span style="font-size:1.3rem;">🔑</span>
+      <!-- Upload card -->
+      <section class="admin-card">
+        <div class="admin-card-head">
+          <div class="admin-card-title">
+            <span class="admin-card-icon">📤</span>
             <div>
-              <strong>Passkey Encryption</strong>
-              <div id="passkeyStatus" style="font-size:0.82rem; opacity:0.8;">Loading…</div>
+              <h2>Upload</h2>
+              <p class="admin-card-sub">Encrypted in your browser — the server only ever sees ciphertext.</p>
             </div>
           </div>
-          <div style="display:flex; align-items:center; gap:14px;">
-            <button type="button" class="btn-cancel" id="registerPasskeyBtn">🔑 Register Passkey</button>
+        </div>
+
+        <div class="dropzone" id="dropzone">
+          <div class="icon">📤</div>
+          <h3>Drop a file here to encrypt &amp; upload</h3>
+          <p id="dropzoneHint">Click to browse. Encryption happens locally before anything leaves your device.</p>
+          <input type="file" id="fileInput">
+        </div>
+
+        <div class="upload-options" id="uploadOptions">
+          <div class="file-info">
+            <span>📄</span>
+            <span class="name" id="selectedFileName"></span>
+            <span class="size" id="selectedFileSize"></span>
+          </div>
+          <label>Expiry</label>
+          <div class="expiry-row">
+            <select id="expirySelect">
+              <option value="never">Never expires</option>
+              <option value="1">1 hour</option>
+              <option value="24">24 hours</option>
+              <option value="168">7 days</option>
+              <option value="720">30 days</option>
+            </select>
+          </div>
+          <label class="burn-toggle">
+            <input type="checkbox" id="burnCheckbox">
+            <span>🔥 Burn after reading <small>— self-destructs after the first decryption</small></span>
+          </label>
+          <label class="burn-toggle" id="usePassphraseRow" style="display:none;">
+            <input type="checkbox" id="usePassphraseToggle">
+            <span>🔒 Use a passphrase instead <small>— makes this file passphrase-only (passkeys cannot open it)</small></span>
+          </label>
+          <label id="uploadPassphraseLabel">Passphrase <small>— the recipient needs this to decrypt</small></label>
+          <div class="passphrase-row" id="uploadPassphraseRow">
+            <input type="password" id="uploadPassphrase" placeholder="Encryption passphrase (required)" autocomplete="off" required>
+            <button type="button" class="btn-icon" id="toggleUploadPw" title="Show/hide">👁️</button>
+          </div>
+          <p class="passkey-upload-note" id="passkeyUploadNote" style="display:none;">🔑 Encrypted for your passkeys — anyone with one of your registered passkeys can decrypt it. No passphrase needed.</p>
+          <div class="upload-actions">
+            <button class="btn-upload" id="uploadBtn"><img src="/assets/icon-unlock-128.png" alt="" class="nyx-ic-btn">Encrypt &amp; Upload</button>
+            <button class="btn-cancel" id="cancelBtn">Cancel</button>
           </div>
         </div>
-        <p id="passkeyUnsupported" style="display:none; color:#ffb4b4; font-size:0.82rem; margin-top:8px;">⚠️ This browser does not support passkeys / WebAuthn.</p>
 
-        <!-- Registered passkeys table -->
-        <div id="passkeyListWrap" style="display:none; margin-top:14px;">
-          <table class="passkey-table" style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+        <div class="progress-container" id="progressContainer">
+          <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+          <div class="progress-text" id="progressText">Preparing...</div>
+        </div>
+      </section>
+
+      <!-- Passkey card -->
+      <section class="admin-card" id="passkeySettings">
+        <div class="admin-card-head">
+          <div class="admin-card-title">
+            <span class="admin-card-icon">🔑</span>
+            <div>
+              <h2>Passkeys</h2>
+              <p class="admin-card-sub" id="passkeyStatus">Loading…</p>
+            </div>
+          </div>
+          <button type="button" class="btn-ghost" id="registerPasskeyBtn">＋ Register Passkey</button>
+        </div>
+        <p class="admin-warn" id="passkeyUnsupported" style="display:none;">⚠️ This browser does not support passkeys / WebAuthn.</p>
+
+        <div id="passkeyListWrap" style="display:none;">
+          <div class="table-scroll">
+            <table class="passkey-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Created</th>
+                  <th>Last used</th>
+                  <th class="th-actions"></th>
+                </tr>
+              </thead>
+              <tbody id="passkeyListBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Files card -->
+      <section class="admin-card">
+        <div class="admin-card-head">
+          <div class="admin-card-title">
+            <span class="admin-card-icon">📁</span>
+            <div>
+              <h2>Your Files</h2>
+              <p class="admin-card-sub">Filenames decrypt locally — the server stores them encrypted.</p>
+            </div>
+          </div>
+          <span class="count" id="fileCount">0 files</span>
+        </div>
+
+        <div class="empty-state" id="emptyState">
+          <div class="icon">🔒</div>
+          <p>No files yet. Drop something to get started!</p>
+        </div>
+
+        <div class="table-scroll">
+          <table class="file-table" id="fileTable" style="display: none;">
             <thead>
-              <tr style="text-align:left; opacity:0.7;">
-                <th style="padding:6px 4px;">Name</th>
-                <th style="padding:6px 4px;">Created</th>
-                <th style="padding:6px 4px;">Last used</th>
-                <th style="padding:6px 4px;"></th>
+              <tr>
+                <th>Name</th>
+                <th>Size</th>
+                <th>Date</th>
+                <th>From</th>
+                <th class="th-actions">Actions</th>
               </tr>
             </thead>
-            <tbody id="passkeyListBody"></tbody>
+            <tbody id="fileListBody"></tbody>
           </table>
         </div>
-      </div>
 
-      <!-- Drop Zone -->
-      <div class="dropzone" id="dropzone">
-        <div class="icon">📤</div>
-        <h3>Drop files here to encrypt & upload</h3>
-        <p>Files are encrypted in your browser before upload. Max 5GB.</p>
-        <input type="file" id="fileInput">
-      </div>
-
-      <!-- Upload Options -->
-      <div class="upload-options" id="uploadOptions">
-        <div class="file-info">
-          <span>📄</span>
-          <span class="name" id="selectedFileName"></span>
-          <span class="size" id="selectedFileSize"></span>
+        <div class="pagination" id="pagination" style="display:none;">
+          <button class="btn-page" id="prevPage">← Prev</button>
+          <span class="page-info" id="pageInfo">Page 1</span>
+          <button class="btn-page" id="nextPage">Next →</button>
         </div>
-        <label>Expiry</label>
-        <div class="expiry-row">
-          <select id="expirySelect">
-            <option value="never">Never expires</option>
-            <option value="1">1 hour</option>
-            <option value="24">24 hours</option>
-            <option value="168">7 days</option>
-            <option value="720">30 days</option>
-          </select>
-        </div>
-        <label class="burn-toggle">
-          <input type="checkbox" id="burnCheckbox">
-          <span>🔥 Burn after reading <small>— self-destructs after the first decryption</small></span>
-        </label>
-        <label class="burn-toggle" id="usePassphraseRow" style="display:none;">
-          <input type="checkbox" id="usePassphraseToggle">
-          <span>🔒 Use a passphrase instead <small>— makes this file passphrase-only (passkeys cannot open it)</small></span>
-        </label>
-        <label id="uploadPassphraseLabel">Passphrase <small>— the recipient needs this to decrypt</small></label>
-        <div class="passphrase-row" id="uploadPassphraseRow">
-          <input type="password" id="uploadPassphrase" placeholder="Encryption passphrase (required)" autocomplete="off" required>
-          <button type="button" class="btn-icon" id="toggleUploadPw" title="Show/hide">👁️</button>
-        </div>
-        <p id="passkeyUploadNote" style="display:none; font-size:0.85rem; opacity:0.85; margin:6px 0;">🔑 Encrypted for your passkeys — anyone with your registered passkeys can decrypt it. No passphrase needed.</p>
-        <div class="upload-actions">
-          <button class="btn-upload" id="uploadBtn"><img src="/assets/icon-unlock-128.png" alt="" class="nyx-ic-btn">Encrypt & Upload</button>
-          <button class="btn-cancel" id="cancelBtn">Cancel</button>
-        </div>
-      </div>
-
-      <!-- Progress -->
-      <div class="progress-container" id="progressContainer">
-        <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
-        <div class="progress-text" id="progressText">Preparing...</div>
-      </div>
-
-      <!-- File List -->
-      <div class="file-list-header">
-        <h2>📁 Your Files</h2>
-        <span class="count" id="fileCount">0 files</span>
-      </div>
-
-      <div class="empty-state" id="emptyState">
-        <div class="icon">🔒</div>
-        <p>No files yet. Drop something to get started!</p>
-      </div>
-
-      <table class="file-table" id="fileTable" style="display: none;">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Size</th>
-            <th>Date</th>
-            <th>From</th>
-            <th style="text-align: right;">Actions</th>
-          </tr>
-        </thead>
-        <tbody id="fileListBody"></tbody>
-      </table>
-
-      <div class="pagination" id="pagination" style="display:none;">
-        <button class="btn-page" id="prevPage">← Prev</button>
-        <span class="page-info" id="pageInfo">Page 1</span>
-        <button class="btn-page" id="nextPage">Next →</button>
-      </div>
-
-      <div class="vault-footer">
-        NyxVault v1.1 <span>·</span> E2E Encrypted <span>·</span> Powered by 🦞
-      </div>
+      </section>
 
       <footer class="vault-footer">
-        🦞 NyxVault v1.0 · End-to-End Encrypted · <a href="https://heynyx.dev">Powered by Nyx</a>
+        🦞 NyxVault v2.3.0 <span>·</span> End-to-End Encrypted <span>·</span> <a href="https://heynyx.dev">Powered by Nyx</a>
       </footer>
 
     </div>
   </div>
 
+  <!-- Custom dialog root (replaces native prompt/confirm) -->
+  <div id="nyxModalRoot"></div>
+
   <!-- Toast container -->
   <div class="toast-container" id="toastContainer"></div>
 
-  <!-- Dependencies (CDN) -->
+  <!-- Self-hosted crypto libs (CSP: script-src 'self') -->
   <script src="/lib/nacl-fast.min.js"></script>
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
   <!-- App -->
-  <script src="/lib/passkey.js?v=221"></script>
-  <script src="/app.js?v=221"></script>
+  <script src="/lib/passkey.js?v=230"></script>
+  <script src="/app.js?v=230"></script>
 </body>
 </html>

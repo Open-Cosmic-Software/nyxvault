@@ -39,6 +39,8 @@ Upload an already-encrypted blob. **Auth required.** `multipart/form-data`.
 | `expires_in` | string | no | Relative TTL: `30m`, `1h`, `24h`, `7d`, `30d`. |
 | `expires_at` | string (ISO 8601) | no | Absolute expiry. Takes precedence over `expires_in`. |
 | `burn_after_read` | `"1"`/`"true"` | no | Enable self-destruct on first successful decrypt. |
+| `key_mode` | `"passkey"` \| `"passphrase"` | no | Default `passphrase`. `passkey` = envelope encryption (see below). |
+| `wrapped_fek` | string (base64) | if `key_mode=passkey` | The 32-byte file key sealed to the vault public key (anonymous X25519 sealed box: `eph_pub(32) ‖ nonce(24) ‖ box`). Opaque to the server. |
 | `uploader` | string | no | Free-text label for logs. |
 
 **Response 200:**
@@ -50,7 +52,8 @@ Upload an already-encrypted blob. **Auth required.** `multipart/form-data`.
   "size_bytes": 10485760,
   "upload_date": "2026-06-21 20:00:00",
   "expires_at": "2026-06-22T20:00:00.000Z",
-  "burn_after_read": false
+  "burn_after_read": false,
+  "key_mode": "passphrase"
 }
 ```
 
@@ -80,10 +83,25 @@ Delete a file (DB row + blob). **Auth required.** Response: `{ "ok": true, "dele
   "upload_date": "2026-06-21 20:00:00",
   "uploader": "cli",
   "nonce": "",
-  "burn_after_read": true
+  "burn_after_read": true,
+  "key_mode": "passphrase"
 }
 ```
 `404` if not found, `410` if expired.
+
+For `key_mode: "passkey"` files the response additionally contains everything a
+browser needs to run the passkey decryption ceremony (all values are useless
+without a registered authenticator):
+
+```json
+{
+  "key_mode": "passkey",
+  "wrapped_fek": "<base64 sealed box>",
+  "passkeys": [
+    { "cred_id": "<base64url>", "prf_salt": "<base64>", "wrapped_privkey": "<base64>", "transports": ["internal","hybrid"] }
+  ]
+}
+```
 
 ### `GET /api/dl/:token/blob`
 **Public.** Streams the raw ciphertext (`application/octet-stream`). This does **not** trigger burn-after-reading — only `/burn` does.
@@ -102,8 +120,44 @@ Possible responses:
 - `{ "malicious": N, "suspicious": N, "harmless": N, "undetected": N, "total": N, "permalink": "..." }`
 - `{ "error": "..." }`
 
+### `GET /api/settings`
+**Public.** Instance capabilities — what an uploader needs to know:
+```json
+{
+  "passkey_mode": "off",
+  "passkey_registered": true,
+  "passkey_count": 1,
+  "max_file_size_mb": 2048,
+  "vault_pubkey": "<base64 X25519 public key or null>"
+}
+```
+`vault_pubkey` is the envelope-encryption public key: any client (web, CLI,
+agent) may seal a file key to it; only a registered passkey can unseal.
+`passkey_mode` is a legacy field kept for compatibility — passkey encryption is
+active whenever `vault_pubkey` is non-null.
+
+`POST /api/settings` (web session auth) accepts `{ "passkey_mode": "on"|"off" }`
+(legacy toggle; refuses `on` with zero registered passkeys).
+
+### Passkey management (web session auth)
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/passkeys` | `{ passkeys: [{ id, label, created_at, last_used, cred_id_short }], has_vault, count }` — never returns key material. |
+| `PATCH /api/passkeys/:id` | Rename. Body `{ "label": "iPhone" }`. |
+| `DELETE /api/passkeys/:id` | Delete. Deleting the **last** passkey answers `409 { "error": "last_passkey", "affected_files": N }` until re-sent with `?confirm=1` — it permanently orphans every passkey-encrypted file and clears the vault public key. |
+
+### WebAuthn ceremonies
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `POST /api/webauthn/register/options` | session | Registration options + fresh per-credential `prf_salt`, `has_vault`, and (if a vault exists) `existing_passkeys` with wrapped private keys for client-side re-wrapping. Includes `excludeCredentials` so an already-registered passkey cannot be added twice. |
+| `POST /api/webauthn/register/verify` | session | Body `{ credential, label, wrapped_privkey, vault_pubkey? }`. `vault_pubkey` is required on the very first registration (the browser just generated the vault keypair). |
+| `POST /api/webauthn/auth/options` | none | Authentication options + `flowId` (challenge is single-use, 5 min TTL). |
+| `POST /api/webauthn/auth/verify` | none | Body `{ credential, flowId }`. Verifies the assertion and bumps the signature counter. The PRF output itself never reaches the server. |
+
 ### `GET /health`
-**Public.** `{ "status": "ok", "service": "nyxvault", "version": "2.0.0", "uptime": <seconds> }`.
+**Public.** `{ "status": "ok", "service": "nyxvault", "version": "2.3.0", "uptime": <seconds> }`.
 
 ---
 
