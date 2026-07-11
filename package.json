@@ -1,6 +1,6 @@
 {
   "name": "nyxvault",
-  "version": "2.4.0",
+  "version": "2.3.0",
   "description": "End-to-end encrypted, zero-knowledge file sharing. Encrypt in your browser, share a link \u2014 the server never sees your data.",
   "main": "server.js",
   "type": "commonjs",

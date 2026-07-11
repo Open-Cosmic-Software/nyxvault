@@ -2,7 +2,25 @@
 
 All notable changes to NyxVault are documented here.
 
-## [2.4.0] — 2026-07-11
+## [2.3.0] — 2026-07-11
+
+### 🔑 Passkey encryption — the headline feature
+
+- **Passkey (WebAuthn PRF) encryption is now the DEFAULT for new uploads.**
+  Unlock your files with Face ID, Touch ID, Windows Hello or a hardware key —
+  no passphrase to remember, nothing the server could ever read.
+- **Envelope architecture:** the vault has an X25519 keypair; the private key
+  is wrapped separately for every registered passkey using a key derived from
+  the WebAuthn **PRF extension** secret. Each file is encrypted with a random
+  file key (FEK) that is sealed to the vault public key (libsodium sealed box).
+  Result: **any of your passkeys decrypts every passkey-mode file**, and adding
+  a passkey never requires re-encrypting anything.
+- **Passphrase mode is still there** — an explicit "use passphrase instead"
+  option at upload time (and the CLI takes a passphrase argument).
+- **Zero-knowledge, end to end:** the server stores only wrapped keys and
+  ciphertext; it can never decrypt files, filenames or content types.
+- **Passkey management UI:** register, rename and delete passkeys, with
+  credential-ID chips, created/last-used timestamps and live count.
 
 ### 🦞 Agent recovery key — CLI decryption for passkey-mode files
 
@@ -38,26 +56,6 @@ All notable changes to NyxVault are documented here.
 - Verified end to end: recovery-decrypt of a passkey-mode upload on an
   isolated test instance (byte-identical output), passphrase CLI round-trip
   unchanged.
-
-## [2.3.0] — 2026-07-11
-
-### 🔑 Passkey encryption — the headline feature
-
-- **Passkey (WebAuthn PRF) encryption is now the DEFAULT for new uploads.**
-  Unlock your files with Face ID, Touch ID, Windows Hello or a hardware key —
-  no passphrase to remember, nothing the server could ever read.
-- **Envelope architecture:** the vault has an X25519 keypair; the private key
-  is wrapped separately for every registered passkey using a key derived from
-  the WebAuthn **PRF extension** secret. Each file is encrypted with a random
-  file key (FEK) that is sealed to the vault public key (libsodium sealed box).
-  Result: **any of your passkeys decrypts every passkey-mode file**, and adding
-  a passkey never requires re-encrypting anything.
-- **Passphrase mode is still there** — an explicit "use passphrase instead"
-  option at upload time (and the CLI takes a passphrase argument).
-- **Zero-knowledge, end to end:** the server stores only wrapped keys and
-  ciphertext; it can never decrypt files, filenames or content types.
-- **Passkey management UI:** register, rename and delete passkeys, with
-  credential-ID chips, created/last-used timestamps and live count.
 
 ### 🛡️ Passkey-loss safety UX
 
