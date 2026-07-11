@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NyxVault — Admin 🔐</title>
-  <link rel="stylesheet" href="/style.css?v=231">
+  <link rel="stylesheet" href="/style.css?v=232">
   <link rel="icon" type="image/png" href="/assets/nyx-logo-256.png">
 </head>
 <body class="cosmic-bg-img">
@@ -105,7 +105,7 @@
             <input type="password" id="uploadPassphrase" placeholder="Encryption passphrase (required)" autocomplete="off" required>
             <button type="button" class="btn-icon" id="toggleUploadPw" title="Show/hide">👁️</button>
           </div>
-          <p class="passkey-upload-note" id="passkeyUploadNote" style="display:none;">🔑 Encrypted for your passkeys — anyone with one of your registered passkeys can decrypt it. No passphrase needed.</p>
+          <p class="passkey-upload-note" id="passkeyUploadNote" style="display:none;">🔑 Encrypted for your passkeys — anyone with one of your registered passkeys can decrypt it. No passphrase needed. <strong>Keep at least one passkey safe: there is no password recovery.</strong></p>
           <div class="upload-actions">
             <button class="btn-upload" id="uploadBtn"><img src="/assets/icon-unlock-128.png" alt="" class="nyx-ic-btn">Encrypt &amp; Upload</button>
             <button class="btn-cancel" id="cancelBtn">Cancel</button>
@@ -131,6 +131,10 @@
           <button type="button" class="btn-ghost" id="registerPasskeyBtn">＋ Register Passkey</button>
         </div>
         <p class="admin-warn" id="passkeyUnsupported" style="display:none;">⚠️ This browser does not support passkeys / WebAuthn.</p>
+        <div class="admin-note" id="passkeyBackupNote">
+          🛡️ <strong>Your passkeys are the only key.</strong> Files encrypted in passkey mode can only be opened with one of the passkeys below — there is <strong>no password reset</strong> and the server cannot recover anything (zero-knowledge by design). <strong>Register at least two passkeys</strong> on different devices (e.g. your phone <em>and</em> your laptop) so a lost or broken device never means lost files.
+          <span class="admin-note-alert" id="passkeySingleWarn" style="display:none;">⚠️ You currently have only <strong>one</strong> passkey — add a backup passkey now.</span>
+        </div>
 
         <div id="passkeyListWrap" style="display:none;">
           <div class="table-scroll">
@@ -207,7 +211,7 @@
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
   <!-- App -->
-  <script src="/lib/passkey.js?v=231"></script>
-  <script src="/app.js?v=231"></script>
+  <script src="/lib/passkey.js?v=232"></script>
+  <script src="/app.js?v=232"></script>
 </body>
 </html>

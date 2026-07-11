@@ -1758,6 +1758,24 @@ body.cosmic-bg-img::after {
   color: var(--text-muted);
   margin: 6px 0;
 }
+.admin-note {
+  margin-top: 14px;
+  padding: 12px 14px;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  color: var(--text-muted);
+  background: rgba(168, 85, 247, 0.07);
+  border: 1px solid rgba(168, 85, 247, 0.28);
+  border-left: 3px solid rgba(168, 85, 247, 0.7);
+  border-radius: 10px;
+}
+.admin-note strong { color: var(--text); }
+.admin-note-alert {
+  display: block;
+  margin-top: 8px;
+  color: #ffb4b4;
+  font-weight: 600;
+}
 
 /* Ghost button (secondary actions, e.g. Register Passkey) */
 .btn-ghost {

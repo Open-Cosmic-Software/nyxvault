@@ -390,7 +390,8 @@ function nyxDialog({ title, message, input, inputType = 'text', inputValue = '',
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn-cancel';
     cancelBtn.type = 'button';
-    cancelBtn.textContent = cancelLabel;
+    cancelBtn.textContent = cancelLabel || '';
+    if (!cancelLabel) cancelBtn.style.display = 'none'; // acknowledgement-only dialogs
     const okBtn = document.createElement('button');
     okBtn.className = danger ? 'btn-danger' : 'btn-primary';
     okBtn.type = 'button';
@@ -422,7 +423,7 @@ function nyxConfirm(title, message, opts = {}) {
   return nyxDialog({ title, message, okLabel: opts.okLabel || 'Confirm', danger: !!opts.danger });
 }
 function nyxPrompt(title, message, opts = {}) {
-  return nyxDialog({ title, message, input: true, inputType: opts.type || 'text', inputValue: opts.value || '', placeholder: opts.placeholder || '', okLabel: opts.okLabel || 'OK' });
+  return nyxDialog({ title, message, input: true, inputType: opts.type || 'text', inputValue: opts.value || '', placeholder: opts.placeholder || '', okLabel: opts.okLabel || 'OK', danger: !!opts.danger });
 }
 
 // ── Toast ─────────────────────────────────────────────────
@@ -526,6 +527,9 @@ async function loadPasskeyList() {
     const res = await api('/api/passkeys');
     const data = await res.json();
     renderPasskeyList(data.passkeys || [], data.count || 0);
+    // "Only one passkey" alert inside the persistent backup note
+    const singleWarn = document.getElementById('passkeySingleWarn');
+    if (singleWarn) singleWarn.style.display = ((data.count || (data.passkeys || []).length) === 1) ? 'block' : 'none';
   } catch { /* ignore */ }
 }
 
@@ -586,9 +590,14 @@ async function deletePasskey(id) {
       const info = await res.json();
       if (info.error === 'last_passkey') {
         const ok = await nyxConfirm('⚠️ Delete your LAST passkey?',
-          'This will make ' + (info.affected_files ?? 'all') + ' passkey-encrypted file(s) permanently UNRECOVERABLE. The vault key cannot be unwrapped without a passkey.\n\nThis cannot be undone.',
-          { okLabel: 'Delete forever', danger: true });
+          'This is your ONLY remaining passkey. Deleting it makes ' + (info.affected_files ?? 'all') + ' passkey-encrypted file(s) permanently UNRECOVERABLE — forever.\n\nNyxVault is zero-knowledge: there is no password reset, no recovery email, and the server cannot decrypt anything. Without a passkey, the vault key can never be unwrapped again.',
+          { okLabel: 'I understand — continue', danger: true });
         if (!ok) return;
+        // Second, unmissable barrier: type DELETE to confirm.
+        const typed = await nyxPrompt('Final confirmation',
+          'Type DELETE (in capitals) to permanently destroy access to all passkey-encrypted files. This cannot be undone.',
+          { placeholder: 'DELETE', okLabel: 'Delete forever', danger: true });
+        if (typed !== 'DELETE') { if (typed !== null) toast('Confirmation text did not match — passkey kept.', 'info'); return; }
         res = await api('/api/passkeys/' + id + '?confirm=1', { method: 'DELETE' });
       }
     }
@@ -614,6 +623,14 @@ async function registerPasskey() {
     if (label === null) { return; }
     const res = await window.NyxPasskey.register(sessionToken, (label && label.trim()) || 'Passkey');
     toast(res.first ? 'First passkey registered — passkey encryption is now active! 🔑' : 'Passkey registered! 🔑', 'success');
+    if (res.first) {
+      // One-time safety briefing: passkeys are the only key, no recovery.
+      await nyxDialog({
+        title: '🔑 Passkey encryption is now active',
+        message: 'New uploads will be encrypted for your passkeys by default.\n\n🛡️ Important: your passkeys are the ONLY way to open passkey-encrypted files. There is no password recovery — the server never sees your keys.\n\nStrongly recommended: register a SECOND passkey on another device (e.g. your phone AND your laptop) so a lost device never means lost files.',
+        okLabel: 'Got it', cancelLabel: null
+      });
+    }
     passkeyRegistered = true;
     await loadPasskeySettings();
   } catch (err) {
@@ -950,6 +967,12 @@ async function uploadFile() {
     progressText.textContent = 'Done!';
 
     toast(`Uploaded ${selectedFile.name} 🔐`, 'success');
+
+    // One-time hint on the first passkey-mode upload: no password recovery.
+    if (pkActive && !localStorage.getItem('nyxvault_pk_upload_hint')) {
+      localStorage.setItem('nyxvault_pk_upload_hint', '1');
+      toast('🔑 Encrypted for your passkeys — keep at least one passkey safe, there is no password recovery.', 'info');
+    }
 
     // Reset
     cancelUpload();

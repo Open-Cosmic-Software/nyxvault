@@ -19,6 +19,21 @@ All notable changes to NyxVault are documented here.
   metadata strings (filenames/content types) also use 21 MB for new uploads,
   with 21 → 16 → 64 MB fallback on decrypt.
 - Passkey-mode files are unaffected (they use a random file key, not Argon2).
+
+### 🛡️ Passkey-loss safety UX
+
+- **Persistent backup note** in the Passkeys admin card: passkeys are the ONLY
+  way to decrypt passkey-mode files (zero-knowledge, no password reset), with a
+  strong recommendation to register at least TWO passkeys on different devices.
+  An extra alert appears while only one passkey is registered.
+- **Hardened last-passkey deletion**: deleting the final passkey now requires
+  an explicit warning modal AND typing `DELETE` to confirm — it spells out that
+  all passkey-encrypted files become permanently unrecoverable.
+- **One-time briefings**: an acknowledgement dialog after registering the first
+  passkey, and a one-time hint after the first passkey-mode upload ("keep at
+  least one passkey safe — there is no password recovery").
+- `nyxDialog` supports acknowledgement-only mode (no cancel button); typed
+  prompts can be styled as destructive.
 - Verified: 21 MB browser passkey E2E, browser passphrase round-trip (NYX4),
   CLI NYX4 round-trip, **and a real 16 MB-era NYX3 file decrypting in both the
   browser and the CLI** — all byte-identical.
