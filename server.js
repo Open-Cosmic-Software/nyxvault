@@ -248,7 +248,7 @@ const stmtGetPasskeyById = db.prepare(`SELECT * FROM passkeys WHERE id = ?`);
 // ── Recovery keys table (agent access to passkey-mode files) ────────────────
 // A recovery key is a SOFTWARE X25519 keypair. The private key lives in a
 // chmod-600 JSON file on the server host (outside git), controlled by the
-// operator/agent (Nyx). Its row stores:
+// operator/agent. Its row stores:
 //   • pubkey           — the recovery public key (base64)
 //   • wrapped_privkey  — the VAULT private key sealed to the recovery public
 //                        key (anonymous sealed box, same format as wrapped_fek)
@@ -1100,7 +1100,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
 });
 
 // ── Recovery key (agent decryption) ──────────────────────────────────────────
-// Lets the server operator's agent (Nyx) decrypt PASSKEY-mode files without a
+// Lets the server operator's agent decrypt PASSKEY-mode files without a
 // biometric authenticator. Flow:
 //   1. POST /api/recovery/init (admin): server generates an X25519 keypair,
 //      writes the PRIVATE key to RECOVERY_KEY_PATH (chmod 600, outside git)

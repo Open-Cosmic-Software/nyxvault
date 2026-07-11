@@ -521,7 +521,7 @@ function renderUploadModeUI() {
 }
 
 // ── Agent recovery key ────────────────────────────────────
-// A software recovery key lets the server host's agent (Nyx) decrypt
+// A software recovery key lets the server host's agent decrypt
 // PASSKEY-mode files without a biometric authenticator. Setting one up needs
 // exactly ONE passkey tap (to unwrap the vault key locally); the vault private
 // key is sealed to the recovery public key in the browser and never travels
@@ -547,7 +547,7 @@ async function loadRecoveryStatus() {
       if (rmBtn) rmBtn.style.display = 'inline-block';
       if (warn) warn.style.display = 'block';
     } else {
-      status.textContent = 'not set up. Add one so the agent (Nyx) can decrypt passkey-mode files via the CLI — takes one passkey tap.';
+      status.textContent = 'not set up. Add one so the host\'s agent can decrypt passkey-mode files via the CLI — takes one passkey tap.';
       if (addBtn) addBtn.style.display = 'inline-block';
       if (rmBtn) rmBtn.style.display = 'none';
       if (warn) warn.style.display = 'none';
@@ -562,7 +562,7 @@ async function addRecoveryKey() {
     return;
   }
   const ok = await nyxConfirm('🦞 Add an agent recovery key?',
-    'This creates a software recovery key on the server so the agent (Nyx) can decrypt PASSKEY-mode files from the command line — no biometrics needed.\n\n⚠️ Trade-off: whoever controls the server\'s recovery key file can decrypt all passkey-mode files. This intentionally reduces zero-knowledge for passkey files (passphrase files stay fully zero-knowledge).\n\nYou will be asked for ONE passkey tap to authorise the wrap.',
+    'This creates a software recovery key on the server so the host\'s agent can decrypt PASSKEY-mode files from the command line — no biometrics needed.\n\n⚠️ Trade-off: whoever controls the server\'s recovery key file can decrypt all passkey-mode files. This intentionally reduces zero-knowledge for passkey files (passphrase files stay fully zero-knowledge).\n\nYou will be asked for ONE passkey tap to authorise the wrap.',
     { okLabel: 'Create recovery key' });
   if (!ok) return;
   if (btn) { btn.disabled = true; btn.textContent = 'Waiting for passkey…'; }
@@ -588,7 +588,7 @@ async function addRecoveryKey() {
     const fin = await finRes.json();
     if (!finRes.ok || !fin.ok) throw new Error(fin.error || 'Could not finalize recovery key');
     toast('Recovery key active — the agent can now decrypt passkey-mode files 🦞', 'success');
-    await nyxConfirm('🦞 Recovery key is active', 'The agent (Nyx) can now decrypt passkey-mode files on the server via nyx-decrypt.js --recovery.\n\n⚠️ Remember: this recovery key lets the server operator decrypt all passkey-mode files. Delete it here at any time to revoke that ability. Passphrase-mode files are not affected and remain fully zero-knowledge.', { okLabel: 'Understood' });
+    await nyxConfirm('🦞 Recovery key is active', 'The host\'s agent can now decrypt passkey-mode files on the server via nyx-decrypt.js --recovery.\n\n⚠️ Remember: this recovery key lets the server operator decrypt all passkey-mode files. Delete it here at any time to revoke that ability. Passphrase-mode files are not affected and remain fully zero-knowledge.', { okLabel: 'Understood' });
   } catch (err) {
     toast('Recovery key setup failed: ' + err.message, 'error');
   } finally {
@@ -601,7 +601,7 @@ async function removeRecoveryKey() {
   const keys = window._recoveryKeys || [];
   if (!keys.length) return;
   const ok = await nyxConfirm('Remove the recovery key?',
-    'The agent (Nyx) will no longer be able to decrypt passkey-mode files from the CLI. Your passkeys keep working as before. You can add a new recovery key at any time.',
+    'The host\'s agent will no longer be able to decrypt passkey-mode files from the CLI. Your passkeys keep working as before. You can add a new recovery key at any time.',
     { okLabel: 'Remove', danger: true });
   if (!ok) return;
   try {
