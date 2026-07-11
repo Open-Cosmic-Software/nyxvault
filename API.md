@@ -125,12 +125,25 @@ node nyx-upload.js <file> [expires_in] [passphrase] [burn]
 ```
 - `<file>` — path to upload.
 - `[expires_in]` — `1h` `24h` `7d` `30d` `90m` (matches `^\d+[mhd]$`). Optional.
-- `[passphrase]` — overrides `NYXVAULT_PASSPHRASE`. Optional if env set.
+- `[passphrase]` — overrides `NYXVAULT_PASSPHRASE`. Optional.
 - `[burn]` — literal `burn` enables burn-after-reading.
 
-Example:
+**Encryption mode (since 2.2.0):**
+- **No passphrase given → passkey mode (default).** The CLI fetches the vault
+  public key from `GET /api/settings` and seals a random file key (FEK) to it
+  (anonymous X25519 sealed box). The file is decryptable in a browser with any
+  registered passkey. Requires a passkey to have been registered first.
+- **Passphrase given → passphrase mode.** Classic Argon2id key derivation;
+  passkeys cannot open the file.
+
+Example (passkey mode — no passphrase):
 ```bash
 export NYXVAULT_API_KEY="..."
+node nyx-upload.js report.pdf 24h
+# → sealed to the vault pubkey; open the /dl/<token> link with a passkey
+```
+Example (passphrase mode):
+```bash
 node nyx-upload.js report.pdf 24h 'correct horse battery staple' burn
 # → prints the /dl/<token> link
 ```

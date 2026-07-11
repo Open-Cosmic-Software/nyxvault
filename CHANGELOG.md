@@ -2,6 +2,76 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.2.0] — 2026-07-11
+
+### 🔑 Passkey encryption, redesigned (envelope encryption)
+
+The v2.1.x passkey design was cryptographically broken for multi-passkey use: it
+assumed one shared global PRF salt would yield the SAME PRF output across every
+passkey. It does not — WebAuthn PRF output is a **per-credential HMAC**, so each
+passkey produces a different secret. v2.2.0 replaces this with proper **envelope
+encryption** so that **every** registered passkey can decrypt **every**
+passkey-encrypted file.
+
+#### New architecture
+- **Vault keypair (X25519).** A single vault keypair is generated in the browser
+  when the **first** passkey is registered. Only the **public** key is stored on
+  the server (`settings.vault_pubkey`). The private key is never stored in
+  plaintext.
+- **Per-passkey key wrapping.** Each passkey gets its **own** random 32-byte PRF
+  salt. From that passkey's PRF output we derive `KEK = HKDF-SHA256(prfOutput)`
+  and store `wrapped_privkey = secretbox(vault_privkey, KEK)` in the passkey row.
+  So **any** registered passkey can independently unwrap the same vault private
+  key.
+- **Adding a passkey later** unwraps the vault private key via an existing
+  passkey, then re-wraps it for the new one (the UI runs the needed ceremonies).
+- **File encryption (passkey mode — now the DEFAULT).** A random file key (FEK)
+  encrypts the file as a normal NYX3 blob; the FEK is sealed to the vault public
+  key (anonymous sealed box) and stored as `wrapped_fek`. **No WebAuthn ceremony
+  is needed to upload** — anyone with the public key can seal (web UI, CLI, agent
+  API). `key_mode='passkey'`.
+- **Decrypt (download page).** `credentials.get()` with `allowCredentials` = all
+  registered passkeys and **per-credential PRF salts** (`prf.evalByCredential`).
+  Whichever passkey the user picks yields its PRF output → KEK → unwrap vault
+  privkey → open the sealed FEK → decrypt the blob. Key material is wiped from
+  memory after use.
+- **Passphrase mode (explicit only).** A file becomes passphrase-only (Argon2id,
+  passkeys cannot open it) **only** when a passphrase is explicitly set — via the
+  new "Use a passphrase instead" toggle in the web UI, or by passing a passphrase
+  to the CLI. `key_mode='passphrase'`.
+
+#### Passkey management (admin UI)
+- New table listing every registered passkey: **name (editable)**, created date,
+  last used, and **rename / delete** actions.
+- Registration now prompts for a **nickname**.
+- Deleting the **last** passkey is hard-gated: it warns that all
+  passkey-encrypted files become permanently unrecoverable and requires explicit
+  confirmation (`?confirm=1`).
+- New endpoints: `GET/PATCH/DELETE /api/passkeys`, and the vault public key is
+  exposed via `GET /api/settings` (`vault_pubkey`).
+
+#### CLI / agent API (`nyx-upload.js`)
+- **Default is now passkey mode.** With no passphrase argument, the CLI fetches
+  the vault public key from `GET /api/settings` and seals a FEK to it — the file
+  is decryptable by any registered passkey in a browser.
+- Passing a passphrase (arg 4 / `NYXVAULT_PASSPHRASE`) keeps the classic
+  passphrase mode. Argument order is unchanged (backward compatible).
+- `nyx-decrypt.js` still decrypts passphrase files; for passkey files it prints a
+  clear message that a browser + passkey is required.
+
+#### Migration & compatibility
+- **Existing passphrase-encrypted files keep working** unchanged (Argon2id path,
+  CLI included). The blob format (NYX3) is byte-identical across both modes.
+- Idempotent DB migrations add `files.wrapped_fek` and
+  `passkeys.prf_salt / wrapped_privkey / last_used`.
+- **Pre-2.2 passkeys are wiped on upgrade** (they used the broken global-salt
+  scheme). Fabian must **re-register** his passkeys — the old vault pubkey is
+  cleared so a fresh vault keypair is created on first re-registration.
+- Zero-knowledge preserved: the server only ever stores the vault **public** key,
+  **wrapped** private keys, **sealed** FEKs, and non-secret salts.
+
+---
+
 ## [2.1.1] — 2026-07-11
 
 ### 🔑 Passkey polish (post-first-test feedback)

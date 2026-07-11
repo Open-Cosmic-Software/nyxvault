@@ -35,7 +35,11 @@ const { URL } = require('url');
 
 const API_KEY = process.env.NYXVAULT_API_KEY || '';
 const BASE_URL = process.env.NYXVAULT_URL || 'https://nyxvault.org';
+// Passphrase is now OPTIONAL. If omitted AND the server has a vault public key,
+// we upload in PASSKEY mode (envelope: random FEK sealed to the vault pubkey).
+// If a passphrase IS supplied, we keep the classic passphrase mode.
 const PASSPHRASE = process.argv[4] || process.env.NYXVAULT_PASSPHRASE || '';
+const PASSPHRASE_EXPLICIT = !!(process.argv[4] || process.env.NYXVAULT_PASSPHRASE);
 
 const crypto = require('crypto');
 
@@ -115,6 +119,86 @@ async function encryptString(str, passphrase) {
   return Buffer.concat([Buffer.from(salt), Buffer.from(nonce), Buffer.from(enc)]).toString('base64');
 }
 
+// ── Sealed box (anonymous X25519) via tweetnacl ───────────
+// seal(msg, recipPub) → eph_pub(32) || nonce(24) || box(msg, nonce, recipPub, eph_sec)
+// Matches public/lib/passkey.js so the browser can unseal it with the vault
+// private key (unwrapped via any registered passkey).
+function sealTo(message, recipPubB64) {
+  const recipPub = new Uint8Array(Buffer.from(recipPubB64, 'base64'));
+  const eph = nacl.box.keyPair();
+  const nonce = nacl.randomBytes(NONCE_BYTES);
+  const ct = nacl.box(message, nonce, recipPub, eph.secretKey);
+  const out = Buffer.concat([Buffer.from(eph.publicKey), Buffer.from(nonce), Buffer.from(ct)]);
+  eph.secretKey.fill(0);
+  return out; // Buffer
+}
+
+// Encrypt a file with a raw 32-byte key (FEK) instead of an Argon2 passphrase.
+// Produces the SAME NYX3 blob format — only the key SOURCE differs.
+async function encryptDataChunkedWithKey(data, key) {
+  const salt = nacl.randomBytes(SALT_BYTES);
+  const numChunks = Math.max(1, Math.ceil(data.length / CHUNK_SIZE));
+  const hmacSubKey = crypto.createHmac('sha256', Buffer.from(key)).update('nyxvault-header-auth').digest();
+  const headerForHMAC = Buffer.alloc(4 + SALT_BYTES + 4);
+  MAGIC3.copy(headerForHMAC, 0);
+  Buffer.from(salt).copy(headerForHMAC, 4);
+  headerForHMAC.writeUInt32BE(numChunks, 4 + SALT_BYTES);
+  const headerHMAC = crypto.createHmac('sha256', hmacSubKey).update(headerForHMAC).digest();
+  const buffers = [];
+  const header = Buffer.alloc(4 + SALT_BYTES + 32 + 4);
+  MAGIC3.copy(header, 0);
+  Buffer.from(salt).copy(header, 4);
+  headerHMAC.copy(header, 4 + SALT_BYTES);
+  header.writeUInt32BE(numChunks, 4 + SALT_BYTES + 32);
+  buffers.push(header);
+  for (let i = 0; i < numChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, data.length);
+    const chunkData = data.slice(start, end);
+    const isLast = (i === numChunks - 1) ? 1 : 0;
+    const prefixed = Buffer.alloc(CHUNK_PREFIX_BYTES + chunkData.length);
+    prefixed.writeUInt32BE(i, 0);
+    prefixed[4] = isLast;
+    chunkData.copy(prefixed, CHUNK_PREFIX_BYTES);
+    const nonce = nacl.randomBytes(NONCE_BYTES);
+    const enc = nacl.secretbox(new Uint8Array(prefixed), nonce, key);
+    buffers.push(Buffer.from(nonce));
+    buffers.push(Buffer.from(enc));
+    process.stdout.write(`\r  Encrypting chunk ${i + 1}/${numChunks}...`);
+  }
+  console.log(' done!');
+  return Buffer.concat(buffers);
+}
+
+// Encrypt a short string (filename / type) with a raw FEK.
+function encryptStringWithKey(str, key) {
+  const salt = nacl.randomBytes(SALT_BYTES);
+  const nonce = nacl.randomBytes(NONCE_BYTES);
+  const enc = nacl.secretbox(new TextEncoder().encode(str), nonce, key);
+  return Buffer.concat([Buffer.from(salt), Buffer.from(nonce), Buffer.from(enc)]).toString('base64');
+}
+
+// Fetch server settings (vault public key + key-mode default).
+function getJSON(urlStr, headers) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(urlStr);
+    const transport = parsed.protocol === 'http:' ? http : https;
+    const req = transport.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'http:' ? 80 : 443),
+      path: parsed.pathname + (parsed.search || ''),
+      method: 'GET',
+      headers: headers || {}
+    }, (res) => {
+      let body = '';
+      res.on('data', d => body += d);
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('Bad settings response: ' + body.slice(0,120))); } });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
 function postForm(urlStr, form, headers) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(urlStr);
@@ -144,27 +228,57 @@ async function upload(filePath, expiresIn, burn) {
     console.error('❌ NYXVAULT_API_KEY is not set. Export it before uploading.');
     process.exit(1);
   }
-  if (!PASSPHRASE) {
-    console.error('❌ No passphrase. Set NYXVAULT_PASSPHRASE or pass it as argument 4.');
-    console.error('   Choose a strong, unique passphrase — it is the ONLY thing protecting your file.');
-    process.exit(1);
-  }
 
   const fileName = path.basename(filePath);
   const fileData = fs.readFileSync(filePath);
 
-  console.log(`🔐 Encrypting ${fileName} (${fileData.length} bytes)...`);
-  const encryptedData = await encryptDataChunked(fileData, PASSPHRASE);
+  // Decide mode: explicit passphrase → passphrase mode. Otherwise, if the
+  // server has a vault public key → passkey mode (envelope). Otherwise error.
+  let mode = 'passphrase';
+  let vaultPubkey = null;
+  if (!PASSPHRASE_EXPLICIT) {
+    try {
+      const settings = await getJSON(`${BASE_URL}/api/settings`);
+      vaultPubkey = settings && settings.vault_pubkey;
+    } catch (e) { /* fall through to the error below */ }
+    if (vaultPubkey) {
+      mode = 'passkey';
+    } else {
+      console.error('❌ No passphrase given and the server has no passkey vault.');
+      console.error('   Either pass a passphrase (arg 4 / NYXVAULT_PASSPHRASE),');
+      console.error('   or register a passkey in the web admin to enable passkey encryption.');
+      process.exit(1);
+    }
+  }
+
+  let encryptedData, encryptedNameB64, encryptedTypeB64, wrappedFekB64 = null;
+  if (mode === 'passkey') {
+    console.log(`🔑 Passkey mode — sealing a file key to the vault public key.`);
+    const fek = nacl.randomBytes(32);
+    console.log(`🔐 Encrypting ${fileName} (${fileData.length} bytes)...`);
+    encryptedData = await encryptDataChunkedWithKey(fileData, fek);
+    encryptedNameB64 = encryptStringWithKey(fileName, fek);
+    encryptedTypeB64 = encryptStringWithKey('application/octet-stream', fek);
+    wrappedFekB64 = sealTo(fek, vaultPubkey).toString('base64');
+    fek.fill(0);
+  } else {
+    console.log(`🔐 Encrypting ${fileName} (${fileData.length} bytes)...`);
+    encryptedData = await encryptDataChunked(fileData, PASSPHRASE);
+    encryptedNameB64 = await encryptString(fileName, PASSPHRASE);
+    encryptedTypeB64 = await encryptString('application/octet-stream', PASSPHRASE);
+  }
 
   console.log(`📤 Uploading encrypted blob (${encryptedData.length} bytes)...`);
-  const encryptedNameB64 = await encryptString(fileName, PASSPHRASE);
-  const encryptedTypeB64 = await encryptString('application/octet-stream', PASSPHRASE);
 
   const form = new FormData();
   form.append('file', encryptedData, { filename: 'encrypted.bin', contentType: 'application/octet-stream' });
   form.append('uploader', 'cli');
   form.append('filename_enc', encryptedNameB64);
   form.append('content_type_enc', encryptedTypeB64);
+  if (mode === 'passkey') {
+    form.append('key_mode', 'passkey');
+    form.append('wrapped_fek', wrappedFekB64);
+  }
   if (expiresIn) form.append('expires_in', expiresIn);
   if (burn) {
     form.append('burn_after_read', '1');
@@ -175,6 +289,7 @@ async function upload(filePath, expiresIn, burn) {
 
   if (result.download_token) {
     console.log(`\n✅ Upload successful!`);
+    if (result.key_mode === 'passkey') console.log(`🔑 Encrypted for your passkeys — open the link in a browser with a registered passkey.`);
     console.log(`📎 Download link: ${BASE_URL}/dl/${result.download_token}`);
     if (result.expires_at) console.log(`⏳ Expires at: ${result.expires_at}`);
     if (result.burn_after_read) console.log(`🔥 Self-destructs after first read.`);
@@ -192,6 +307,11 @@ if (!filePath) {
   console.log('NyxVault Upload CLI');
   console.log('Usage: node nyx-upload.js <file> [expires_in: 1h|24h|7d|30d] [passphrase] [burn]');
   console.log('Env:   NYXVAULT_API_KEY (required), NYXVAULT_URL, NYXVAULT_PASSPHRASE, NYXVAULT_BURN');
+  console.log('');
+  console.log('Modes:');
+  console.log('  • No passphrase given → PASSKEY mode (default). The file key is sealed to');
+  console.log('    the vault public key; decrypt in a browser with any registered passkey.');
+  console.log('  • Passphrase given    → passphrase mode (Argon2id). Passkeys cannot open it.');
   process.exit(1);
 }
 upload(filePath, expiresIn, burn).catch(e => { console.error('❌', e.message); process.exit(1); });

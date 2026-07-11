@@ -58,7 +58,9 @@ async function decryptDataNYX3(data, passphrase) {
   const expectedHMAC = crypto.createHmac('sha256', hmacSubKey).update(headerForHMAC).digest();
 
   if (!crypto.timingSafeEqual(storedHMAC, expectedHMAC)) {
-    throw new Error('Decryption failed! Wrong passphrase or header tampered.');
+    throw new Error('Decryption failed! Wrong passphrase or header tampered.\n' +
+      '   Note: if this file was uploaded in PASSKEY mode (no passphrase), it cannot be\n' +
+      '   decrypted here. Open its /dl/ link in a browser with a registered passkey.');
   }
   console.log('  ✓ Header HMAC verified');
 

@@ -102,11 +102,19 @@ db.exec(`
     db.exec(`ALTER TABLE files ADD COLUMN downloaded_at TEXT`);
     console.log('[MIGRATE] added column downloaded_at');
   }
-  // Per-file key mode: 'passphrase' (default, Argon2id) or 'passkey' (WebAuthn PRF).
+  // Per-file key mode: 'passphrase' (default, Argon2id) or 'passkey' (envelope).
   // Old files have no column → default to 'passphrase' so nothing breaks.
   if (!cols.includes('key_mode')) {
     db.exec(`ALTER TABLE files ADD COLUMN key_mode TEXT NOT NULL DEFAULT 'passphrase'`);
     console.log('[MIGRATE] added column key_mode');
+  }
+  // v2.2.0 envelope encryption: passkey-mode files store the file-encryption
+  // key (FEK) sealed to the vault public key (anonymous sealed box). The blob
+  // itself is a standard NYX3 blob whose key IS the FEK. NULL for passphrase
+  // files and legacy passkey files (which no longer exist after the v2.2 wipe).
+  if (!cols.includes('wrapped_fek')) {
+    db.exec(`ALTER TABLE files ADD COLUMN wrapped_fek TEXT`);
+    console.log('[MIGRATE] added column wrapped_fek');
   }
 })();
 
@@ -126,18 +134,20 @@ function getSetting(key, fallback = null) {
 }
 function setSetting(key, value) { stmtSetSetting.run(key, String(value)); }
 
-// One global PRF salt, shared across every registered passkey so that ANY of
-// Fabian's devices (iPhone + Laptop, iCloud-synced or not) can decrypt ANY
-// passkey-encrypted file. The salt is not secret — it's a domain-separation
-// nonce for the PRF evaluation — so it's safe to expose to the download page.
-// Generated exactly once on first boot.
-if (!getSetting('prf_salt')) {
-  setSetting('prf_salt', crypto.randomBytes(32).toString('base64'));
-  console.log('[INIT] generated global PRF salt');
-}
 if (!getSetting('passkey_mode')) setSetting('passkey_mode', 'off');
 
-// ── Passkeys table (WebAuthn credentials) ─────────────────
+// ── Passkeys table (WebAuthn credentials + envelope key wrapping) ───────
+// v2.2.0 architecture (envelope encryption):
+//   • A single vault X25519 keypair is created client-side when the FIRST
+//     passkey is registered. The PUBLIC key is stored in settings; the PRIVATE
+//     key is never stored in plaintext.
+//   • Every passkey row stores its OWN random `prf_salt` (per-credential PRF
+//     output is a per-credential HMAC — salts are NOT interchangeable) plus a
+//     `wrapped_privkey`: the vault private key encrypted (nacl.secretbox) under
+//     a KEK derived (HKDF) from THAT passkey's PRF output. So every registered
+//     passkey can independently unwrap the same vault private key.
+//   • Files sealed to the vault public key can therefore be opened by ANY
+//     registered passkey.
 db.exec(`
   CREATE TABLE IF NOT EXISTS passkeys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,20 +156,55 @@ db.exec(`
     counter INTEGER NOT NULL DEFAULT 0,
     transports TEXT,
     label TEXT,
+    prf_salt TEXT,
+    wrapped_privkey TEXT,
+    last_used TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
-const stmtInsertPasskey = db.prepare(`INSERT INTO passkeys (cred_id, public_key, counter, transports, label) VALUES (?, ?, ?, ?, ?)`);
+// Idempotent migration for pre-2.2 passkeys tables.
+(() => {
+  const pcols = db.prepare(`PRAGMA table_info(passkeys)`).all().map(c => c.name);
+  if (!pcols.includes('prf_salt')) {
+    db.exec(`ALTER TABLE passkeys ADD COLUMN prf_salt TEXT`);
+    console.log('[MIGRATE] added column passkeys.prf_salt');
+  }
+  if (!pcols.includes('wrapped_privkey')) {
+    db.exec(`ALTER TABLE passkeys ADD COLUMN wrapped_privkey TEXT`);
+    console.log('[MIGRATE] added column passkeys.wrapped_privkey');
+  }
+  if (!pcols.includes('last_used')) {
+    db.exec(`ALTER TABLE passkeys ADD COLUMN last_used TEXT`);
+    console.log('[MIGRATE] added column passkeys.last_used');
+  }
+  // The old v2.1.x global PRF salt is obsolete under envelope encryption.
+  // Pre-2.2 passkeys WITHOUT wrapping data are cryptographically incompatible
+  // (they wrongly assumed one shared global PRF salt). Wipe them so the user
+  // re-registers cleanly. Rows created by v2.2 always have prf_salt +
+  // wrapped_privkey set, so this only ever fires once on upgrade.
+  const legacy = db.prepare(`SELECT COUNT(*) AS c FROM passkeys WHERE prf_salt IS NULL OR wrapped_privkey IS NULL`).get().c;
+  if (legacy > 0) {
+    db.prepare(`DELETE FROM passkeys WHERE prf_salt IS NULL OR wrapped_privkey IS NULL`).run();
+    console.log('[MIGRATE] removed ' + legacy + ' incompatible pre-2.2 passkey(s) — re-registration required');
+    // Drop the now-orphaned vault pubkey + old global prf salt so the next
+    // registration regenerates a fresh vault keypair.
+    db.prepare(`DELETE FROM settings WHERE key IN ('vault_pubkey','prf_salt')`).run();
+    setSetting('passkey_mode', 'off');
+  }
+})();
+const stmtInsertPasskey = db.prepare(`INSERT INTO passkeys (cred_id, public_key, counter, transports, label, prf_salt, wrapped_privkey) VALUES (?, ?, ?, ?, ?, ?, ?)`);
 const stmtGetAllPasskeys = db.prepare(`SELECT * FROM passkeys ORDER BY created_at ASC`);
 const stmtGetPasskeyByCredId = db.prepare(`SELECT * FROM passkeys WHERE cred_id = ?`);
-const stmtUpdatePasskeyCounter = db.prepare(`UPDATE passkeys SET counter = ? WHERE cred_id = ?`);
+const stmtUpdatePasskeyCounter = db.prepare(`UPDATE passkeys SET counter = ?, last_used = datetime('now') WHERE cred_id = ?`);
 const stmtDeletePasskey = db.prepare(`DELETE FROM passkeys WHERE id = ?`);
 const stmtCountPasskeys = db.prepare(`SELECT COUNT(*) AS c FROM passkeys`);
+const stmtRenamePasskey = db.prepare(`UPDATE passkeys SET label = ? WHERE id = ?`);
+const stmtGetPasskeyById = db.prepare(`SELECT * FROM passkeys WHERE id = ?`);
 
 // Prepared statements
 const stmtInsert = db.prepare(`
-  INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name, burn_after_read, key_mode)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name, burn_after_read, key_mode, wrapped_fek)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtMarkDownloaded = db.prepare(`UPDATE files SET downloaded_at = datetime('now') WHERE id = ?`);
 const stmtGetAll = db.prepare(`SELECT * FROM files ORDER BY upload_date DESC`);
@@ -363,8 +408,22 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
     }
     const nonce = req.body.nonce || '';
     const burnAfterRead = (req.body.burn_after_read === '1' || req.body.burn_after_read === 'true' || req.body.burn_after_read === true) ? 1 : 0;
-    // Per-file key mode: 'passkey' (WebAuthn PRF) or 'passphrase' (default).
+    // Per-file key mode: 'passkey' (envelope/sealed-box FEK) or 'passphrase'.
     const keyMode = (req.body.key_mode === 'passkey') ? 'passkey' : 'passphrase';
+    // For passkey mode, the client uploads the FEK sealed to the vault public
+    // key (base64). The server stores it opaquely — it can never open it.
+    let wrappedFek = null;
+    if (keyMode === 'passkey') {
+      wrappedFek = (typeof req.body.wrapped_fek === 'string' && req.body.wrapped_fek.length > 0)
+        ? req.body.wrapped_fek.slice(0, 4096) : null;
+      if (!wrappedFek) {
+        // Clean up the just-uploaded temp file before bailing.
+        if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+          try { fs.unlinkSync(req.file.path); } catch {}
+        }
+        return res.status(400).json({ error: 'passkey mode requires wrapped_fek' });
+      }
+    }
     // Don't store original filename (privacy: zero-knowledge)
     const originalName = 'redacted';
 
@@ -384,7 +443,8 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
       nonce,
       originalName,
       burnAfterRead,
-      keyMode
+      keyMode,
+      wrappedFek
     );
 
     const file = stmtGetById.get(result.lastInsertRowid);
@@ -587,9 +647,18 @@ app.get('/api/dl/:token/meta', downloadLimiter, (req, res) => {
       nonce: file.nonce,
       burn_after_read: !!file.burn_after_read,
       key_mode: file.key_mode || 'passphrase',
-      // The PRF salt is a non-secret domain-separation nonce; the download page
-      // needs it to re-derive the same key from the visitor's passkey.
-      prf_salt: (file.key_mode === 'passkey') ? getSetting('prf_salt') : undefined
+      // Envelope encryption (passkey mode): the download page needs the FEK
+      // sealed to the vault public key, plus the vault public key itself is NOT
+      // needed to DECRYPT (only the private key is), but we include the list of
+      // registered passkeys' PRF salts so the client can run the ceremony that
+      // unwraps the vault private key. wrapped_fek is opaque to the server.
+      wrapped_fek: (file.key_mode === 'passkey') ? (file.wrapped_fek || undefined) : undefined,
+      passkeys: (file.key_mode === 'passkey') ? stmtGetAllPasskeys.all().map(p => ({
+        cred_id: p.cred_id,
+        prf_salt: p.prf_salt,
+        wrapped_privkey: p.wrapped_privkey,
+        transports: p.transports ? JSON.parse(p.transports) : undefined
+      })) : undefined
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
@@ -672,7 +741,9 @@ app.get('/api/settings', (req, res) => {
       passkey_mode: passkeyMode,
       passkey_registered: passkeyCount > 0,
       passkey_count: passkeyCount,
-      prf_salt: getSetting('prf_salt')
+      // Vault public key (base64) for envelope encryption. Anyone (web UI, CLI,
+      // agent API) can seal a FEK to it; only a registered passkey can unseal.
+      vault_pubkey: getSetting('vault_pubkey') || null
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
@@ -721,32 +792,75 @@ setInterval(() => {
   for (const [k, v] of webauthnChallenges) if (v.expires < now) webauthnChallenges.delete(k);
 }, 5 * 60 * 1000);
 
-// List registered passkeys (admin only)
+// List registered passkeys (admin only). Returns management metadata only —
+// never the wrapped private key material.
 app.get('/api/passkeys', authWeb, (req, res) => {
   try {
     const rows = stmtGetAllPasskeys.all().map(p => ({
       id: p.id, label: p.label, created_at: p.created_at,
+      last_used: p.last_used || null,
       cred_id_short: p.cred_id.slice(0, 12)
     }));
-    return res.json({ passkeys: rows });
+    return res.json({
+      passkeys: rows,
+      has_vault: !!getSetting('vault_pubkey'),
+      count: rows.length
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Delete a passkey (admin only). If it was the last one, auto-disable passkey mode.
-app.delete('/api/passkeys/:id', authWeb, (req, res) => {
+// Rename a passkey (admin only).
+app.patch('/api/passkeys/:id', authWeb, (req, res) => {
   try {
-    stmtDeletePasskey.run(parseInt(req.params.id));
-    if (stmtCountPasskeys.get().c === 0) setSetting('passkey_mode', 'off');
+    const { label } = req.body || {};
+    if (!label || !String(label).trim()) return res.status(400).json({ error: 'A name is required' });
+    const row = stmtGetPasskeyById.get(parseInt(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Passkey not found' });
+    stmtRenamePasskey.run(String(label).trim().slice(0, 64), row.id);
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Registration: generate options (admin only). Requests the PRF extension so
-// the credential can later produce a stable secret for key derivation.
+// Delete a passkey (admin only). Deleting the LAST passkey makes every
+// passkey-encrypted file permanently unrecoverable (the vault private key can
+// no longer be unwrapped) — the client must confirm via ?confirm=1.
+app.delete('/api/passkeys/:id', authWeb, (req, res) => {
+  try {
+    const row = stmtGetPasskeyById.get(parseInt(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Passkey not found' });
+    const total = stmtCountPasskeys.get().c;
+    const isLast = total <= 1;
+    const passkeyFiles = db.prepare(`SELECT COUNT(*) AS c FROM files WHERE key_mode = 'passkey'`).get().c;
+    if (isLast && req.query.confirm !== '1') {
+      return res.status(409).json({
+        error: 'last_passkey',
+        message: 'This is your LAST passkey. Deleting it will make ' + passkeyFiles +
+          ' passkey-encrypted file(s) permanently UNRECOVERABLE. Re-send the request with ?confirm=1 to proceed.',
+        affected_files: passkeyFiles
+      });
+    }
+    stmtDeletePasskey.run(row.id);
+    if (stmtCountPasskeys.get().c === 0) {
+      setSetting('passkey_mode', 'off');
+      // The vault keypair is now useless (no passkey can unwrap it). Drop the
+      // pubkey so a future registration starts a clean new vault.
+      db.prepare(`DELETE FROM settings WHERE key = 'vault_pubkey'`).run();
+      console.log('[PASSKEY] last passkey removed — vault pubkey cleared');
+    }
+    return res.json({ ok: true, was_last: isLast });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Registration phase 1: generate options (admin only). Also mints a fresh
+// per-credential PRF salt for the new passkey and tells the client whether a
+// vault keypair already exists (if so, an existing passkey must unwrap the
+// vault private key so it can be re-wrapped for the new one).
 app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
   try {
     const existing = stmtGetAllPasskeys.all();
@@ -761,10 +875,9 @@ app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
         transports: p.transports ? JSON.parse(p.transports) : undefined
       })),
       authenticatorSelection: {
-        // 'preferred' (not 'required') for broad compatibility with platform
-        // authenticators — Windows Hello and some iCloud versions reject
-        // required resident keys. Passkeys are still discoverable when the
-        // platform supports it.
+        // 'preferred' (not 'required') for broad platform-authenticator
+        // compatibility — Windows Hello / some iCloud versions reject required
+        // resident keys. Passkeys stay discoverable where the platform supports it.
         residentKey: 'preferred',
         requireResidentKey: false,
         userVerification: 'preferred'
@@ -772,22 +885,44 @@ app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
       extensions: { prf: {} }
     });
     const token = req.headers['x-session-token'];
-    putChallenge('reg:' + token, options.challenge);
-    return res.json(options);
+    // Fresh 32-byte PRF salt for THIS new credential.
+    const newPrfSalt = crypto.randomBytes(32).toString('base64');
+    putChallenge('reg:' + token, { challenge: options.challenge, prfSalt: newPrfSalt });
+    const hasVault = !!getSetting('vault_pubkey');
+    return res.json({
+      ...options,
+      prf_salt: newPrfSalt,
+      has_vault: hasVault,
+      // For re-wrapping: the client authenticates with an EXISTING passkey to
+      // unwrap the vault private key, then wraps it under the new passkey's KEK.
+      existing_passkeys: hasVault ? existing.map(p => ({
+        cred_id: p.cred_id,
+        prf_salt: p.prf_salt,
+        wrapped_privkey: p.wrapped_privkey,
+        transports: p.transports ? JSON.parse(p.transports) : undefined
+      })) : []
+    });
   } catch (err) {
     console.error('Register options error:', err);
     return res.status(500).json({ error: 'Could not generate registration options' });
   }
 });
 
-// Registration: verify response (admin only) and persist the credential.
+// Registration phase 2: verify response (admin only) and persist the credential
+// together with its wrapped copy of the vault private key. On the FIRST-ever
+// registration the client also supplies the freshly generated vault_pubkey.
 app.post('/api/webauthn/register/verify', authWeb, async (req, res) => {
   try {
     const token = req.headers['x-session-token'];
-    const expectedChallenge = takeChallenge('reg:' + token);
-    if (!expectedChallenge) return res.status(400).json({ error: 'Challenge expired — try again.' });
-    const { credential, label } = req.body || {};
+    const stored = takeChallenge('reg:' + token);
+    if (!stored) return res.status(400).json({ error: 'Challenge expired — try again.' });
+    const expectedChallenge = stored.challenge;
+    const expectedPrfSalt = stored.prfSalt;
+    const { credential, label, wrapped_privkey, vault_pubkey } = req.body || {};
     if (!credential) return res.status(400).json({ error: 'Missing credential' });
+    if (!wrapped_privkey || typeof wrapped_privkey !== 'string') {
+      return res.status(400).json({ error: 'Missing wrapped private key' });
+    }
 
     const verification = await verifyRegistrationResponse({
       response: credential,
@@ -809,21 +944,30 @@ app.post('/api/webauthn/register/verify', authWeb, async (req, res) => {
     if (stmtGetPasskeyByCredId.get(credId)) {
       return res.status(409).json({ error: 'This passkey is already registered.' });
     }
-    const prfEnabled = !!(credential.clientExtensionResults &&
-      credential.clientExtensionResults.prf &&
-      credential.clientExtensionResults.prf.enabled);
 
+    const hasVault = !!getSetting('vault_pubkey');
+    if (!hasVault) {
+      // First passkey ever — the client generated the vault keypair. Persist
+      // its public key. (The private key only ever exists wrapped.)
+      if (!vault_pubkey || typeof vault_pubkey !== 'string') {
+        return res.status(400).json({ error: 'First registration must include vault_pubkey' });
+      }
+      setSetting('vault_pubkey', vault_pubkey.slice(0, 128));
+      console.log('[VAULT] initialised vault public key');
+    }
+
+    // Persist the credential + its per-credential prf salt + wrapped privkey.
     stmtInsertPasskey.run(credId, publicKeyB64, counter, transports,
-      (label && String(label).slice(0, 64)) || 'Passkey');
-    console.log('[PASSKEY] registered ' + credId.slice(0, 12) + '… (prf=' + prfEnabled + ')');
-    return res.json({ ok: true, prf_enabled: prfEnabled, cred_id_short: credId.slice(0, 12) });
+      (label && String(label).slice(0, 64)) || 'Passkey',
+      expectedPrfSalt, wrapped_privkey.slice(0, 4096));
+    console.log('[PASSKEY] registered ' + credId.slice(0, 12) + '… (envelope-wrapped)');
+    return res.json({ ok: true, cred_id_short: credId.slice(0, 12), vault_pubkey: getSetting('vault_pubkey') });
   } catch (err) {
     console.error('Register verify error:', err);
     return res.status(500).json({ error: 'Passkey registration failed: ' + err.message });
   }
 });
 
-// Authentication: generate options (public).
 app.post('/api/webauthn/auth/options', downloadLimiter, async (req, res) => {
   try {
     const passkeys = stmtGetAllPasskeys.all();
@@ -880,7 +1024,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nyxvault', version: '2.1.1', uptime: process.uptime() });
+  res.json({ status: 'ok', service: 'nyxvault', version: '2.2.0', uptime: process.uptime() });
 });
 
 // ── Session cleanup (every 30min) ─────────────────────────

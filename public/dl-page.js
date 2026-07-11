@@ -275,9 +275,10 @@
         $('dlError').style.display = 'block';
         return;
       }
-      const prfSalt = fileMeta && fileMeta.prf_salt;
-      if (!prfSalt) {
-        $('dlError').textContent = 'This file is missing its passkey salt (server configuration).';
+      const passkeys = fileMeta && fileMeta.passkeys;
+      const wrappedFek = fileMeta && fileMeta.wrapped_fek;
+      if (!passkeys || !passkeys.length || !wrappedFek) {
+        $('dlError').textContent = 'This file is missing its passkey envelope data (server configuration).';
         $('dlError').style.display = 'block';
         return;
       }
@@ -285,8 +286,11 @@
       const origText = passkeyDecryptBtn.textContent;
       passkeyDecryptBtn.textContent = 'Waiting for passkey…';
       try {
-        const prfOutput = await window.NyxPasskey.getPRF(prfSalt);
-        const keyProvider = (salt) => window.NyxPasskey.deriveKey(prfOutput, salt);
+        // Unseal the file key with ANY registered passkey (per-credential PRF
+        // salts via evalByCredential), then decrypt the NYX3 blob with it.
+        const fek = await window.NyxPasskey.unsealFEK(passkeys, wrappedFek);
+        const keyProvider = window.NyxPasskey.fekKeyProvider(fek);
+        fek.fill(0);
         await runDecrypt(null, keyProvider);
       } catch (err) {
         $('dlError').textContent = err.message || 'Passkey decryption failed';

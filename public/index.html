@@ -57,7 +57,7 @@
         </div>
       </header>
 
-      <!-- Passkey settings -->
+      <!-- Passkey settings + management -->
       <div class="passkey-settings" id="passkeySettings" style="margin:12px 0; padding:14px 16px; border:1px solid rgba(255,255,255,0.12); border-radius:12px; background:rgba(255,255,255,0.03);">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
           <div style="display:flex; align-items:center; gap:10px;">
@@ -69,13 +69,24 @@
           </div>
           <div style="display:flex; align-items:center; gap:14px;">
             <button type="button" class="btn-cancel" id="registerPasskeyBtn">🔑 Register Passkey</button>
-            <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-              <input type="checkbox" id="passkeyModeToggle">
-              <span>Passkey mode</span>
-            </label>
           </div>
         </div>
         <p id="passkeyUnsupported" style="display:none; color:#ffb4b4; font-size:0.82rem; margin-top:8px;">⚠️ This browser does not support passkeys / WebAuthn.</p>
+
+        <!-- Registered passkeys table -->
+        <div id="passkeyListWrap" style="display:none; margin-top:14px;">
+          <table class="passkey-table" style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+            <thead>
+              <tr style="text-align:left; opacity:0.7;">
+                <th style="padding:6px 4px;">Name</th>
+                <th style="padding:6px 4px;">Created</th>
+                <th style="padding:6px 4px;">Last used</th>
+                <th style="padding:6px 4px;"></th>
+              </tr>
+            </thead>
+            <tbody id="passkeyListBody"></tbody>
+          </table>
+        </div>
       </div>
 
       <!-- Drop Zone -->
@@ -107,12 +118,16 @@
           <input type="checkbox" id="burnCheckbox">
           <span>🔥 Burn after reading <small>— self-destructs after the first decryption</small></span>
         </label>
+        <label class="burn-toggle" id="usePassphraseRow" style="display:none;">
+          <input type="checkbox" id="usePassphraseToggle">
+          <span>🔒 Use a passphrase instead <small>— makes this file passphrase-only (passkeys cannot open it)</small></span>
+        </label>
         <label id="uploadPassphraseLabel">Passphrase <small>— the recipient needs this to decrypt</small></label>
         <div class="passphrase-row" id="uploadPassphraseRow">
           <input type="password" id="uploadPassphrase" placeholder="Encryption passphrase (required)" autocomplete="off" required>
           <button type="button" class="btn-icon" id="toggleUploadPw" title="Show/hide">👁️</button>
         </div>
-        <p id="passkeyUploadNote" style="display:none; font-size:0.85rem; opacity:0.85; margin:6px 0;">🔑 Passkey mode active — you'll be asked for your passkey when uploading. No passphrase needed.</p>
+        <p id="passkeyUploadNote" style="display:none; font-size:0.85rem; opacity:0.85; margin:6px 0;">🔑 Encrypted for your passkeys — anyone with your registered passkeys can decrypt it. No passphrase needed.</p>
         <div class="upload-actions">
           <button class="btn-upload" id="uploadBtn"><img src="/assets/icon-unlock-128.png" alt="" class="nyx-ic-btn">Encrypt & Upload</button>
           <button class="btn-cancel" id="cancelBtn">Cancel</button>
@@ -174,7 +189,7 @@
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
   <!-- App -->
-  <script src="/lib/passkey.js?v=211"></script>
-  <script src="/app.js?v=211"></script>
+  <script src="/lib/passkey.js?v=220"></script>
+  <script src="/app.js?v=220"></script>
 </body>
 </html>

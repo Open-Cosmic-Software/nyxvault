@@ -309,8 +309,9 @@ async function fetchWithProgress(url, onProgress) {
 let sessionToken = sessionStorage.getItem('nyxvault_session');
 let vaultPassphrase = sessionStorage.getItem('nyxvault_passphrase');
 let selectedFile = null;
-let passkeyMode = false;        // global setting: encrypt uploads with passkey
+let vaultPubkey = null;         // vault public key (base64) for envelope encryption
 let passkeyRegistered = false;  // at least one passkey exists
+let usePassphraseUpload = false; // explicit "use passphrase instead" toggle
 
 // ── DOM refs ──────────────────────────────────────────────
 const loginOverlay = document.getElementById('loginOverlay');
@@ -383,39 +384,123 @@ function showApp() {
 async function loadPasskeySettings() {
   try {
     const s = await (await fetch('/api/settings')).json();
-    passkeyMode = s.passkey_mode === 'on';
+    vaultPubkey = s.vault_pubkey || null;
     passkeyRegistered = !!s.passkey_registered;
     renderPasskeyUI();
+    loadPasskeyList();
   } catch { /* settings are optional; ignore */ }
 }
 
+// Passkey mode is now the DEFAULT whenever a vault public key exists. There is
+// no global on/off toggle any more — a file only becomes passphrase-only when
+// the user EXPLICITLY chooses "use passphrase instead" at upload time.
+function passkeyModeActive() {
+  return !!vaultPubkey && !usePassphraseUpload;
+}
+
 function renderPasskeyUI() {
-  const toggle = document.getElementById('passkeyModeToggle');
   const status = document.getElementById('passkeyStatus');
   const supportWarn = document.getElementById('passkeyUnsupported');
   const supported = window.NyxPasskey && window.NyxPasskey.supported();
 
-  if (toggle) {
-    toggle.checked = passkeyMode;
-    toggle.disabled = !passkeyRegistered || !supported;
-  }
   if (status) {
     status.textContent = passkeyRegistered
-      ? (passkeyMode ? '🔑 Passkey mode ACTIVE — uploads are encrypted with your passkey'
-                     : 'Passkey registered · mode off (passphrase encryption)')
-      : 'No passkey registered';
+      ? '🔑 Passkey encryption is ON by default — every upload is decryptable with all your registered passkeys.'
+      : 'No passkey registered yet — uploads use a passphrase. Register a passkey to enable passkey encryption.';
   }
   if (supportWarn) supportWarn.style.display = supported ? 'none' : 'block';
+  renderUploadModeUI();
+}
 
-  // Passphrase input hint: in passkey mode the upload passphrase is not needed.
+// Toggle the upload passphrase field depending on mode.
+function renderUploadModeUI() {
+  const pkActive = passkeyModeActive();
   const upPwRow = document.getElementById('uploadPassphraseRow');
   const upPwLabel = document.getElementById('uploadPassphraseLabel');
   const upPw = document.getElementById('uploadPassphrase');
-  if (upPwRow) upPwRow.style.display = passkeyMode ? 'none' : 'flex';
-  if (upPwLabel) upPwLabel.style.display = passkeyMode ? 'none' : 'block';
-  if (upPw) upPw.required = !passkeyMode;
   const pkNote = document.getElementById('passkeyUploadNote');
-  if (pkNote) pkNote.style.display = passkeyMode ? 'block' : 'none';
+  const passphraseToggleRow = document.getElementById('usePassphraseRow');
+
+  // Show the "use passphrase instead" toggle only when a passkey vault exists.
+  if (passphraseToggleRow) passphraseToggleRow.style.display = (passkeyRegistered && vaultPubkey) ? 'flex' : 'none';
+
+  const showPw = !pkActive; // passphrase field visible only in passphrase mode
+  if (upPwRow) upPwRow.style.display = showPw ? 'flex' : 'none';
+  if (upPwLabel) upPwLabel.style.display = showPw ? 'block' : 'none';
+  if (upPw) upPw.required = showPw;
+  if (pkNote) pkNote.style.display = pkActive ? 'block' : 'none';
+}
+
+// ── Passkey management table ──────────────────────────────
+async function loadPasskeyList() {
+  const wrap = document.getElementById('passkeyListWrap');
+  if (!wrap) return;
+  try {
+    const res = await api('/api/passkeys');
+    const data = await res.json();
+    renderPasskeyList(data.passkeys || [], data.count || 0);
+  } catch { /* ignore */ }
+}
+
+function renderPasskeyList(passkeys, count) {
+  const wrap = document.getElementById('passkeyListWrap');
+  const body = document.getElementById('passkeyListBody');
+  if (!wrap || !body) return;
+  if (!passkeys.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  body.innerHTML = '';
+  for (const pk of passkeys) {
+    const tr = document.createElement('tr');
+    tr.dataset.id = pk.id;
+
+    const nameTd = document.createElement('td');
+    nameTd.textContent = pk.label || 'Passkey';
+    nameTd.title = pk.cred_id_short + '…';
+
+    const createdTd = document.createElement('td'); createdTd.className = 'meta';
+    createdTd.textContent = pk.created_at ? formatDate(pk.created_at) : '—';
+    const usedTd = document.createElement('td'); usedTd.className = 'meta';
+    usedTd.textContent = pk.last_used ? formatDate(pk.last_used) : 'never';
+
+    const actTd = document.createElement('td'); actTd.className = 'actions';
+    actTd.innerHTML =
+      '<button class="btn-icon" data-pk-act="rename" title="Rename">✏️</button>' +
+      '<button class="btn-icon delete" data-pk-act="delete" title="Delete">🗑️</button>';
+
+    tr.append(nameTd, createdTd, usedTd, actTd);
+    body.appendChild(tr);
+  }
+}
+
+async function renamePasskey(id) {
+  const name = prompt('New name for this passkey:');
+  if (!name || !name.trim()) return;
+  try {
+    const res = await api('/api/passkeys/' + id, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: name.trim() })
+    });
+    if (!res.ok) throw new Error((await res.json()).error || 'Rename failed');
+    toast('Passkey renamed', 'success');
+    loadPasskeyList();
+  } catch (err) { toast(err.message, 'error'); }
+}
+
+async function deletePasskey(id) {
+  try {
+    let res = await api('/api/passkeys/' + id, { method: 'DELETE' });
+    if (res.status === 409) {
+      const info = await res.json();
+      if (info.error === 'last_passkey') {
+        const ok = confirm('⚠️ ' + info.message + '\n\nAre you absolutely sure? This cannot be undone.');
+        if (!ok) return;
+        res = await api('/api/passkeys/' + id + '?confirm=1', { method: 'DELETE' });
+      }
+    }
+    if (!res.ok) throw new Error((await res.json()).error || 'Delete failed');
+    toast('Passkey deleted', 'success');
+    await loadPasskeySettings();
+  } catch (err) { toast(err.message, 'error'); }
 }
 
 async function registerPasskey() {
@@ -425,43 +510,21 @@ async function registerPasskey() {
     return;
   }
   if (btn) { btn.disabled = true; btn.textContent = 'Waiting for passkey…'; }
-  // The registration runs TWO prompts: first to create the passkey, then a
-  // quick second one to actually test PRF support (create() results are
-  // unreliable across authenticators). Tell the user so it isn't confusing.
-  toast('You may be prompted twice: once to create the passkey, once to verify encryption support.', 'info');
+  // Registration may prompt the passkey up to THREE times: (optionally) an
+  // existing passkey to unwrap the vault key, once to create the new passkey,
+  // and once to verify its PRF and wrap the vault key. Warn the user.
+  toast('You may be prompted a few times: to verify an existing passkey (if any), create the new one, and confirm encryption support.', 'info');
   try {
-    const label = navigator.platform || 'Passkey';
-    const res = await window.NyxPasskey.register(sessionToken, label);
-    if (!res.prf_enabled) {
-      toast('⚠️ Passkey saved, but the PRF extension is not available on this device — encryption won\'t work here. Try the latest Chrome or Edge, or use an iPhone/iPad passkey.', 'error');
-    } else {
-      toast('Passkey registered! 🔑', 'success');
-    }
+    const label = prompt('Name this passkey (e.g. "iPhone", "Laptop"):', navigator.platform || 'Passkey');
+    if (label === null) { return; }
+    const res = await window.NyxPasskey.register(sessionToken, (label && label.trim()) || 'Passkey');
+    toast(res.first ? 'First passkey registered — passkey encryption is now active! 🔑' : 'Passkey registered! 🔑', 'success');
     passkeyRegistered = true;
     await loadPasskeySettings();
   } catch (err) {
     toast('Passkey registration failed: ' + err.message, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '🔑 Register Passkey'; }
-  }
-}
-
-async function togglePasskeyMode(on) {
-  try {
-    const res = await api('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ passkey_mode: on ? 'on' : 'off' })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Fehler');
-    passkeyMode = data.passkey_mode === 'on';
-    passkeyRegistered = !!data.passkey_registered;
-    renderPasskeyUI();
-    toast(passkeyMode ? 'Passkey mode enabled 🔑' : 'Passkey mode disabled', 'success');
-  } catch (err) {
-    toast('Could not save setting: ' + err.message, 'error');
-    await loadPasskeySettings();
   }
 }
 
@@ -679,15 +742,25 @@ async function uploadFile() {
   const uploadPw = (document.getElementById('uploadPassphrase')?.value || '').trim();
   if (!selectedFile) return;
 
-  // Passkey mode: derive the key from the registered passkey (WebAuthn PRF)
-  // instead of a passphrase. A single get() ceremony yields the PRF secret,
-  // which is HKDF'd per-file. keyProvider(salt) plugs into the same NYX3 path.
+  // ENVELOPE ENCRYPTION (default when a passkey vault exists):
+  //   • Generate a random file key (FEK) and encrypt the file/metadata with it
+  //     (standard NYX3 blob). NO WebAuthn ceremony at upload time.
+  //   • Seal the FEK to the vault public key → wrapped_fek. Any registered
+  //     passkey can later unseal it on the download page.
+  // PASSPHRASE MODE (explicit): only when no passkey vault exists, or the user
+  //   ticked "use passphrase instead". Argon2id, passkeys CANNOT open it.
+  const pkActive = passkeyModeActive();
   let keyProvider = null;
-  if (passkeyMode) {
-    if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
-      toast('Passkeys are not supported by this browser', 'error');
+  let wrappedFekB64 = null;
+  if (pkActive) {
+    if (!vaultPubkey) {
+      toast('No vault key found — register a passkey first, or use a passphrase.', 'error');
       return;
     }
+    const { fek, wrappedFekB64: wf } = window.NyxPasskey.sealFEK(vaultPubkey);
+    wrappedFekB64 = wf;
+    keyProvider = window.NyxPasskey.fekKeyProvider(fek);
+    fek.fill(0);
   } else if (!uploadPw) {
     toast('Please set a passphrase for this file', 'error');
     document.getElementById('uploadPassphrase')?.focus();
@@ -698,16 +771,9 @@ async function uploadFile() {
   uploadBtn.textContent = 'Encrypting...';
   progressContainer.classList.add('show');
   progressFill.style.width = '10%';
-  progressText.textContent = passkeyMode ? 'Waiting for passkey…' : 'Encrypting file...';
+  progressText.textContent = 'Encrypting file...';
 
   try {
-    if (passkeyMode) {
-      // Fetch the global PRF salt, run the ceremony once, and build a key provider.
-      const settings = await (await fetch('/api/settings')).json();
-      if (!settings.prf_salt) throw new Error('Server has no PRF salt configured');
-      const prfOutput = await window.NyxPasskey.getPRF(settings.prf_salt);
-      keyProvider = (salt) => window.NyxPasskey.deriveKey(prfOutput, salt);
-    }
 
     // Read file
     const arrayBuffer = await selectedFile.arrayBuffer();
@@ -747,7 +813,10 @@ async function uploadFile() {
     formData.append('filename_enc', filenameEnc);
     formData.append('content_type_enc', contentTypeEnc);
     formData.append('original_name', selectedFile.name);
-    if (passkeyMode) formData.append('key_mode', 'passkey');
+    if (pkActive) {
+      formData.append('key_mode', 'passkey');
+      formData.append('wrapped_fek', wrappedFekB64);
+    }
     if (expiresAt) formData.append('expires_at', expiresAt);
     const burnEl = document.getElementById('burnCheckbox');
     if (burnEl && burnEl.checked) formData.append('burn_after_read', '1');
@@ -801,6 +870,21 @@ async function uploadFile() {
 
 // ── Download (authenticated) ──────────────────────────────
 async function downloadFile(id) {
+  // Passkey-encrypted files need the WebAuthn ceremony, which lives on the
+  // shareable download page. Detect them and open that page in a new tab.
+  const rowEl = document.querySelector(`#fileListBody tr[data-id="${id}"]`);
+  const tok = rowEl && rowEl.dataset.token;
+  if (tok) {
+    try {
+      const meta = await (await fetch('/api/dl/' + tok + '/meta')).json();
+      if (meta && meta.key_mode === 'passkey') {
+        toast('Passkey file — opening the passkey download page…', 'info');
+        window.open('/dl/' + tok, '_blank', 'noopener');
+        return;
+      }
+    } catch { /* fall through to passphrase download */ }
+  }
+
   toast('Downloading…', 'info');
 
   let encryptedData;
@@ -916,8 +1000,29 @@ cancelBtn.addEventListener('click', cancelUpload);
 // Passkey admin controls
 const registerPasskeyBtn = document.getElementById('registerPasskeyBtn');
 if (registerPasskeyBtn) registerPasskeyBtn.addEventListener('click', registerPasskey);
-const passkeyModeToggle = document.getElementById('passkeyModeToggle');
-if (passkeyModeToggle) passkeyModeToggle.addEventListener('change', (e) => togglePasskeyMode(e.target.checked));
+
+// "Use passphrase instead" toggle (makes a single upload passphrase-only).
+const usePassphraseToggle = document.getElementById('usePassphraseToggle');
+if (usePassphraseToggle) usePassphraseToggle.addEventListener('change', (e) => {
+  usePassphraseUpload = !!e.target.checked;
+  renderUploadModeUI();
+  if (usePassphraseUpload) {
+    const upPw = document.getElementById('uploadPassphrase');
+    if (upPw && vaultPassphrase && !upPw.value) upPw.value = vaultPassphrase;
+  }
+});
+
+// Passkey management table (rename / delete) — event delegation.
+const passkeyListBody = document.getElementById('passkeyListBody');
+if (passkeyListBody) passkeyListBody.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-pk-act]');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  if (!tr) return;
+  const id = parseInt(tr.dataset.id);
+  if (btn.dataset.pkAct === 'rename') renamePasskey(id);
+  else if (btn.dataset.pkAct === 'delete') deletePasskey(id);
+});
 
 // Upload passphrase show/hide toggle
 const toggleUploadPw = document.getElementById('toggleUploadPw');
