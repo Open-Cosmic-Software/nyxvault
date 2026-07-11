@@ -238,6 +238,31 @@ already implies (admin + recovery-key file), so it needs a finalised recovery
 key to be available. Calibration stores only opaque ciphertext + an opaque
 context label; the server never sees the PRF value.
 
+> **Wrap authorization.** Adding a per-device wrap (`/api/webauthn/add-wrap`) is
+> intentionally reachable without an admin login (calibration/self-healing run
+> from the public download page), so it is protected by a **single-use, HMAC-
+> signed token bound to one credential**, minted only by a proven passkey
+> assertion or an admin recovery bootstrap. Wraps are **insert-only** (an
+> existing context is never silently overwritten) and **capped per passkey**, so
+> a public `cred_id` alone cannot inject, overwrite, or flood wraps.
+
+### 🔐 Two-factor authentication (optional)
+
+An optional TOTP second factor (RFC 6238 — Google Authenticator, Authy,
+1Password, …) can be enabled in the admin panel. When on, it is required for the
+admin login **and** for device calibration. Implementation notes:
+
+- Self-contained (Node `crypto`, HMAC-SHA1) — no extra dependency, no CDN.
+- The secret is **encrypted at rest** (AES-256-GCM under a key derived from
+  `SESSION_SECRET`), so a stolen DB dump alone does not reveal it.
+- **Replay-protected**: each accepted code's time-step is recorded, so a captured
+  code cannot be reused within its window.
+- Enabling verifies one live code first, so a mistyped secret can't lock you out.
+- **⚠️ No recovery codes.** There is deliberately no printable backup-code list.
+  If you lose your authenticator, disable 2FA by clearing `totp_enabled` /
+  `totp_secret` in the `settings` table directly (you already control the host).
+  Keep this in mind before enabling it on a server you can't shell into.
+
 ## 🔒 Security Model
 
 | Property | How |

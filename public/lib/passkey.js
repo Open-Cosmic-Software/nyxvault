@@ -248,14 +248,18 @@ async function doGetPRF(options, allowCreds, opts) {
 
 // Verify an assertion server-side (counter bump). Best-effort — a failure here
 // does not compromise the client-side key material.
+// Returns the server's one-shot wrap_token (bound to the asserted credential)
+// when present, so callers that need to add a wrap are authorized to do so.
 async function verifyAssertion(flowId, assertionPayload) {
   try {
-    await fetch('/api/webauthn/auth/verify', {
+    const res = await fetch('/api/webauthn/auth/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ flowId, credential: assertionPayload })
     });
-  } catch { /* non-fatal */ }
+    const data = await res.json().catch(() => ({}));
+    return (data && data.wrap_token) || null;
+  } catch { return null; /* non-fatal for pure-unwrap callers */ }
 }
 
 // ── Registration (admin) ──────────────────────────────────
@@ -434,7 +438,9 @@ async function enableThisDevice(passkeys, vaultPriv, prfContext) {
   const { prfOutput, usedCredId, assertionPayload } = await doGetPRF(
     authOpts, passkeys, { evalByCredential: true }
   );
-  await verifyAssertion(authOpts.flowId, assertionPayload);
+  // The assertion just proved possession of THIS credential; the server returns
+  // a one-shot token that authorizes exactly one add-wrap for this cred_id.
+  const wrapToken = await verifyAssertion(authOpts.flowId, assertionPayload);
   const kek = await kekFromPRF(prfOutput);
   prfOutput.fill(0);
   const wrapped = wrapWithKEK(vaultPriv, kek); // fresh random nonce inside
@@ -445,7 +451,8 @@ async function enableThisDevice(passkeys, vaultPriv, prfContext) {
     body: JSON.stringify({
       cred_id: usedCredId,
       prf_context: prfContext || 'platform',
-      wrapped_privkey: bytesToB64(wrapped)
+      wrapped_privkey: bytesToB64(wrapped),
+      wrap_token: wrapToken
     })
   });
   if (!res.ok) throw new Error((await res.json()).error || 'Could not save the device key.');

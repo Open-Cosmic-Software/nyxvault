@@ -218,19 +218,97 @@ function totpCode(secretB32, forStep) {
               (hmac[offset + 2] << 8) | hmac[offset + 3];
   return String(bin % 1000000).padStart(6, '0');
 }
-function totpVerify(secretB32, code) {
-  if (!secretB32 || !code) return false;
+// Returns the matched step number (for replay tracking) or -1 on failure.
+function totpMatchStep(secretB32, code) {
+  if (!secretB32 || !code) return -1;
   const clean = String(code).replace(/\D/g, '');
-  if (clean.length !== 6) return false;
+  if (clean.length !== 6) return -1;
   const step = Math.floor(Date.now() / 1000 / 30);
   for (let w = -1; w <= 1; w++) {
-    // Constant-time-ish compare per candidate window.
+    // Constant-time compare per candidate window.
     const cand = totpCode(secretB32, step + w);
-    if (crypto.timingSafeEqual(Buffer.from(cand), Buffer.from(clean))) return true;
+    if (crypto.timingSafeEqual(Buffer.from(cand), Buffer.from(clean))) return step + w;
   }
-  return false;
+  return -1;
 }
+// Verify WITH replay protection: a code from a step at or below the last
+// consumed step is rejected, so a captured code can’t be reused within its
+// (or a neighbouring) window. The last-used step is persisted in settings.
+function totpVerify(secretB32, code, consume = true) {
+  const matched = totpMatchStep(secretB32, code);
+  if (matched < 0) return false;
+  if (consume) {
+    const last = parseInt(getSetting('totp_last_step', '0'), 10) || 0;
+    if (matched <= last) return false; // replay: already used this (or an earlier) step
+    setSetting('totp_last_step', String(matched));
+  }
+  return true;
+}
+// Encrypt the TOTP secret AT REST with AES-256-GCM under a key derived from
+// SESSION_SECRET (env-only, never in the DB / never in git). A stolen DB dump
+// alone therefore does NOT reveal the TOTP secret. Format: v1.<iv_b64>.<tag_b64>.<ct_b64>.
+// Legacy plain base32 secrets are still read transparently and re-encrypted on
+// next enable, so this is fully backward compatible.
+const TOTP_AT_REST_KEY = crypto.createHash('sha256')
+  .update('nyxvault-totp-at-rest|' + (process.env.SESSION_SECRET || process.env.WEB_PASSWORD || 'nyxvault-fallback'))
+  .digest();
+function encryptTotpSecret(plainB32) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', TOTP_AT_REST_KEY, iv);
+  const ct = Buffer.concat([cipher.update(plainB32, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return 'v1.' + iv.toString('base64') + '.' + tag.toString('base64') + '.' + ct.toString('base64');
+}
+function decryptTotpSecret(stored) {
+  if (!stored) return '';
+  if (!stored.startsWith('v1.')) return stored; // legacy plain base32
+  try {
+    const [, ivB64, tagB64, ctB64] = stored.split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', TOTP_AT_REST_KEY, Buffer.from(ivB64, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(ctB64, 'base64')), decipher.final()]).toString('utf8');
+  } catch { return ''; }
+}
+// Read the active secret in the clear (decrypting at-rest form as needed).
+function getTotpSecret() { return decryptTotpSecret(getSetting('totp_secret')); }
 function totpEnabled() { return getSetting('totp_enabled') === 'on' && !!getSetting('totp_secret'); }
+
+// ── One-shot wrap-authorization tokens ──────────────────────────────────
+// /api/webauthn/add-wrap is intentionally public (device calibration + self-
+// healing run from a non-admin download page). To stop anyone with a public
+// cred_id from injecting/overwriting wraps, add-wrap now requires a short-lived,
+// single-use, HMAC-signed token that is only minted where control of the exact
+// credential was just proven: a successful passkey ASSERTION (self-healing) or
+// an admin RECOVERY-BOOTSTRAP (calibration). The token is bound to one cred_id,
+// expires in 120s, and each jti is consumable exactly once.
+const WRAP_TOKEN_KEY = crypto.createHash('sha256')
+  .update('nyxvault-wrap-token|' + (process.env.SESSION_SECRET || process.env.WEB_PASSWORD || 'nyxvault-fallback'))
+  .digest();
+const usedWrapJtis = new Map(); // jti -> expiry ms (single-use enforcement)
+function mintWrapToken(credId) {
+  const payload = { cred_id: credId, jti: crypto.randomBytes(16).toString('hex'), exp: Date.now() + 120000 };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', WRAP_TOKEN_KEY).update(body).digest('base64url');
+  return body + '.' + sig;
+}
+function verifyWrapToken(token, credId) {
+  if (!token || typeof token !== 'string' || token.indexOf('.') < 0) return false;
+  const [body, sig] = token.split('.');
+  if (!body || !sig) return false;
+  const expected = crypto.createHmac('sha256', WRAP_TOKEN_KEY).update(body).digest('base64url');
+  const a = Buffer.from(sig), b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+  let payload;
+  try { payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')); } catch { return false; }
+  if (!payload || payload.cred_id !== credId) return false;
+  if (typeof payload.exp !== 'number' || Date.now() > payload.exp) return false;
+  // Single use: reject a jti we've already consumed; otherwise consume it.
+  const now = Date.now();
+  for (const [j, exp] of usedWrapJtis) if (exp < now) usedWrapJtis.delete(j); // GC
+  if (usedWrapJtis.has(payload.jti)) return false;
+  usedWrapJtis.set(payload.jti, payload.exp);
+  return true;
+}
 
 // ── Passkeys table (WebAuthn credentials + envelope key wrapping) ───────
 // v2.2.0 architecture (envelope encryption):
@@ -309,8 +387,14 @@ db.exec(`
   );
 `);
 const stmtGetWrapsForPasskey = db.prepare(`SELECT prf_context, wrapped_privkey FROM passkey_wraps WHERE passkey_id = ? ORDER BY id ASC`);
-const stmtInsertWrap = db.prepare(`INSERT OR REPLACE INTO passkey_wraps (passkey_id, prf_context, wrapped_privkey) VALUES (?, ?, ?)`);
+// INSERT-only (no REPLACE): an existing (passkey, context) wrap can NEVER be
+// silently clobbered by a later request — this defangs the “overwrite the legit
+// platform wrap with junk” attack even before token auth runs. Re-calibration
+// of an existing context is a deliberate delete-then-insert (same token gate).
+const stmtInsertWrap = db.prepare(`INSERT INTO passkey_wraps (passkey_id, prf_context, wrapped_privkey) VALUES (?, ?, ?) ON CONFLICT(passkey_id, prf_context) DO NOTHING`);
+const stmtCountWraps = db.prepare(`SELECT COUNT(*) AS c FROM passkey_wraps WHERE passkey_id = ?`);
 const stmtGetPasskeyByCredIdRow = db.prepare(`SELECT id FROM passkeys WHERE cred_id = ?`);
+const MAX_WRAPS_PER_PASSKEY = 8; // primary/platform/hybrid/custom — well above real need
 
 // Build the client-facing view of a passkey: its primary wrap plus EVERY
 // additional per-context wrap. `wraps` is the full list the client trial-
@@ -454,6 +538,16 @@ const downloadLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Dedicated, tighter limiter for wrap writes so wrap-spam can't ride the
+// download budget. Real use adds at most a handful of wraps per device.
+const wrapLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many calibration attempts, slow down.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // Session tokens (in-memory, simple)
 const sessions = new Map();
 
@@ -548,7 +642,7 @@ app.post('/auth/login', loginLimiter, async (req, res) => {
       if (!totp_code) {
         return res.status(401).json({ error: 'Two-factor code required', totp_required: true });
       }
-      if (!totpVerify(getSetting('totp_secret'), totp_code)) {
+      if (!totpVerify(getTotpSecret(), totp_code)) {
         return res.status(401).json({ error: 'Wrong two-factor code', totp_required: true });
       }
     }
@@ -965,7 +1059,7 @@ app.post('/api/2fa/setup', authWeb, (req, res) => {
     if (totpEnabled()) return res.status(409).json({ error: 'Two-factor is already enabled. Disable it first to re-provision.' });
     const secret = base32Encode(crypto.randomBytes(20)); // 160-bit
     // Store as a PENDING secret; only /enable promotes it to active.
-    setSetting('totp_pending_secret', secret);
+    setSetting('totp_pending_secret', encryptTotpSecret(secret));
     const label = encodeURIComponent('NyxVault admin');
     const issuer = encodeURIComponent('NyxVault');
     const otpauth = `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
@@ -979,11 +1073,15 @@ app.post('/api/2fa/setup', authWeb, (req, res) => {
 app.post('/api/2fa/enable', authWeb, (req, res) => {
   try {
     const { code } = req.body || {};
-    const pending = getSetting('totp_pending_secret');
+    const pending = decryptTotpSecret(getSetting('totp_pending_secret'));
     if (!pending) return res.status(400).json({ error: 'Start setup first.' });
-    if (!totpVerify(pending, code)) return res.status(400).json({ error: 'That code is not valid — check your authenticator and try again.' });
-    setSetting('totp_secret', pending);
+    // Use consume=false here: the first verified code activates 2FA, but we
+    // don't want to burn the step so the user's very next login with the same
+    // code window still works. The login path consumes steps for replay safety.
+    if (!totpVerify(pending, code, false)) return res.status(400).json({ error: 'That code is not valid — check your authenticator and try again.' });
+    setSetting('totp_secret', encryptTotpSecret(pending)); // encrypted at rest
     setSetting('totp_enabled', 'on');
+    setSetting('totp_last_step', '0'); // reset replay window for the new secret
     stmtSetSetting.run('totp_pending_secret', '');
     console.log('[2FA] enabled');
     return res.json({ ok: true, enabled: true });
@@ -997,12 +1095,15 @@ app.post('/api/2fa/disable', authWeb, (req, res) => {
   try {
     if (!totpEnabled()) return res.json({ ok: true, enabled: false });
     const { code } = req.body || {};
-    if (!totpVerify(getSetting('totp_secret'), code)) {
+    // consume=false: the admin is already authenticated here; don't risk a
+    // replay-window lockout when turning the feature off.
+    if (!totpVerify(getTotpSecret(), code, false)) {
       return res.status(400).json({ error: 'Enter a valid current 2FA code to disable it.' });
     }
     setSetting('totp_enabled', 'off');
     stmtSetSetting.run('totp_secret', '');
     stmtSetSetting.run('totp_pending_secret', '');
+    stmtSetSetting.run('totp_last_step', '0');
     console.log('[2FA] disabled');
     return res.json({ ok: true, enabled: false });
   } catch (err) {
@@ -1248,7 +1349,10 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
     });
     if (!verification.verified) return res.status(400).json({ error: 'Passkey authentication failed' });
     stmtUpdatePasskeyCounter.run(verification.authenticationInfo.newCounter, dbCred.cred_id);
-    return res.json({ ok: true });
+    // Mint a one-shot wrap token bound to this exact credential: the caller has
+    // just proven possession, so it may add ONE wrap for itself (self-healing).
+    const wrap_token = mintWrapToken(dbCred.cred_id);
+    return res.json({ ok: true, wrap_token });
   } catch (err) {
     console.error('Auth verify error:', err);
     return res.status(500).json({ error: 'Passkey authentication failed: ' + err.message });
@@ -1264,20 +1368,35 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
 // opaque ciphertext + an opaque context label — it never sees the vault key or
 // the PRF value. Public endpoint (no admin): adding a wrap requires already
 // possessing a valid wrap ciphertext, which itself required a passkey ceremony.
-app.post('/api/webauthn/add-wrap', downloadLimiter, (req, res) => {
+app.post('/api/webauthn/add-wrap', wrapLimiter, (req, res) => {
   try {
-    const { cred_id, prf_context, wrapped_privkey } = req.body || {};
+    const { cred_id, prf_context, wrapped_privkey, wrap_token } = req.body || {};
     if (!cred_id || typeof cred_id !== 'string') return res.status(400).json({ error: 'Missing cred_id' });
     if (!wrapped_privkey || typeof wrapped_privkey !== 'string' || wrapped_privkey.length > 4096) {
       return res.status(400).json({ error: 'Missing or invalid wrapped_privkey' });
+    }
+    // Authorization: require a fresh, single-use token bound to THIS cred_id,
+    // minted only by a proven passkey assertion or an admin recovery bootstrap.
+    if (!verifyWrapToken(wrap_token, cred_id)) {
+      return res.status(403).json({ error: 'Missing or invalid wrap authorization' });
     }
     // Opaque, bounded label; default to 'platform' (the on-device context).
     let ctx = (typeof prf_context === 'string' && prf_context) ? prf_context : 'platform';
     ctx = ctx.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 32) || 'platform';
     const row = stmtGetPasskeyByCredIdRow.get(cred_id);
     if (!row) return res.status(404).json({ error: 'Unknown passkey' });
-    stmtInsertWrap.run(row.id, ctx, wrapped_privkey);
-    console.log('[WRAP] added “' + ctx + '” vault-key wrap for passkey #' + row.id);
+    // Bound the number of wraps per passkey (DoS / DB-bloat / trial-decrypt cost).
+    if (stmtCountWraps.get(row.id).c >= MAX_WRAPS_PER_PASSKEY) {
+      return res.status(409).json({ error: 'Wrap limit reached for this passkey' });
+    }
+    const info = stmtInsertWrap.run(row.id, ctx, wrapped_privkey);
+    // INSERT-only: if the context already exists it's a no-op (changes === 0),
+    // which we treat as success (idempotent) rather than clobbering it.
+    if (info.changes === 0) {
+      console.log('[WRAP] context “' + ctx + '” already present for passkey #' + row.id + ' (no-op)');
+    } else {
+      console.log('[WRAP] added “' + ctx + '” vault-key wrap for passkey #' + row.id);
+    }
     return res.json({ ok: true });
   } catch (err) {
     console.error('Add-wrap error:', err);
