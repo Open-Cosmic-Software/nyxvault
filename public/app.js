@@ -59,9 +59,13 @@ async function deriveHMACKey(encKey) {
 // ── Chunked Encrypt (NYX3 format — integrity-protected) ─────
 // Format: NYX3(4) + salt(16) + header_hmac(32) + num_chunks(4 BE) + [nonce(24) + ciphertext]...
 // Each chunk plaintext is prefixed with: chunk_index(4 BE) + is_last(1)
-async function encryptDataChunked(data, passphrase, onProgress) {
+//
+// `keyProvider` (optional): async (salt) => Uint8Array(32). When supplied (e.g.
+// passkey mode), it derives the key from the per-file salt instead of Argon2id.
+// The blob format is byte-identical either way — only the key SOURCE changes.
+async function encryptDataChunked(data, passphrase, onProgress, keyProvider) {
   const salt = generateSalt();
-  const key = await deriveKey(passphrase, salt);
+  const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt);
   const hmacKey = await deriveHMACKey(key);
   const numChunks = Math.max(1, Math.ceil(data.length / CHUNK_SIZE));
 
@@ -126,14 +130,14 @@ async function encryptDataChunked(data, passphrase, onProgress) {
 }
 
 // ── Chunked Decrypt (NYX3 format — integrity-verified) ─────
-async function decryptDataNYX3(data, passphrase, onProgress) {
+async function decryptDataNYX3(data, passphrase, onProgress, keyProvider) {
   let offset = 4; // skip magic
   const salt = data.slice(offset, offset + SALT_BYTES); offset += SALT_BYTES;
   const storedHMAC = data.slice(offset, offset + 32); offset += 32;
   const numChunks = (data[offset] << 24) | (data[offset+1] << 16) | (data[offset+2] << 8) | data[offset+3];
   offset += 4;
 
-  const key = await deriveKey(passphrase, salt);
+  const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt);
   const hmacKey = await deriveHMACKey(key);
 
   // Verify header HMAC
@@ -194,9 +198,9 @@ async function decryptDataNYX3(data, passphrase, onProgress) {
 
 
 // ── Encrypt (auto-selects chunked for large files, legacy for small strings) ─────
-async function encryptData(data, passphrase, onProgress) {
+async function encryptData(data, passphrase, onProgress, keyProvider) {
   // Always use chunked format for files
-  return encryptDataChunked(data, passphrase, onProgress);
+  return encryptDataChunked(data, passphrase, onProgress, keyProvider);
 }
 
 // Helper: derive key with specific memory size
@@ -214,9 +218,9 @@ async function deriveKeyWithMem(passphrase, salt, memorySize) {
 }
 
 // ── Decrypt (auto-detects format) ─────
-async function decryptData(encryptedBlob, passphrase, onProgress) {
+async function decryptData(encryptedBlob, passphrase, onProgress, keyProvider) {
   if (isNYX3(encryptedBlob)) {
-    return decryptDataNYX3(encryptedBlob, passphrase, onProgress);
+    return decryptDataNYX3(encryptedBlob, passphrase, onProgress, keyProvider);
   }
   if (isNYX2(encryptedBlob)) {
     throw new Error('This file uses the legacy NYX2 format without integrity protection. Migrate it to NYX3 first using: node nyx-migrate.js <file> <passphrase>');
@@ -233,11 +237,12 @@ async function decryptData(encryptedBlob, passphrase, onProgress) {
   throw new Error('Decryption failed – wrong passphrase?');
 }
 
-// Encrypt a string (uses legacy format for small metadata — simpler)
-async function encryptString(str, passphrase) {
+// Encrypt a string (uses legacy format for small metadata — simpler).
+// `keyProvider` (optional): async (salt) => Uint8Array(32) for passkey mode.
+async function encryptString(str, passphrase, keyProvider) {
   const data = nacl.util.decodeUTF8(str);
   const salt = generateSalt();
-  const key = await deriveKey(passphrase, salt);
+  const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt);
   const nonce = generateNonce();
   const encrypted = nacl.secretbox(data, nonce, key);
   const result = new Uint8Array(salt.length + nonce.length + encrypted.length);
@@ -247,12 +252,19 @@ async function encryptString(str, passphrase) {
   return nacl.util.encodeBase64(result);
 }
 
-// Decrypt a base64 string (legacy format, with Argon2 fallback)
-async function decryptString(b64, passphrase) {
+// Decrypt a base64 string (legacy format, with Argon2 fallback).
+// `keyProvider` (optional): async (salt) => Uint8Array(32) for passkey mode.
+async function decryptString(b64, passphrase, keyProvider) {
   const data = nacl.util.decodeBase64(b64);
   const salt = data.slice(0, SALT_BYTES);
   const nonce = data.slice(SALT_BYTES, SALT_BYTES + NONCE_BYTES);
   const ciphertext = data.slice(SALT_BYTES + NONCE_BYTES);
+  if (keyProvider) {
+    const key = await keyProvider(salt);
+    const decrypted = nacl.secretbox.open(ciphertext, nonce, key);
+    if (decrypted) return nacl.util.encodeUTF8(decrypted);
+    throw new Error('Decryption failed – wrong passkey?');
+  }
   // Try 16MB first, then 64MB for old encrypted strings
   for (const mem of [16384, 65536]) {
     const key = await deriveKeyWithMem(passphrase, salt, mem);
@@ -297,6 +309,8 @@ async function fetchWithProgress(url, onProgress) {
 let sessionToken = sessionStorage.getItem('nyxvault_session');
 let vaultPassphrase = sessionStorage.getItem('nyxvault_passphrase');
 let selectedFile = null;
+let passkeyMode = false;        // global setting: encrypt uploads with passkey
+let passkeyRegistered = false;  // at least one passkey exists
 
 // ── DOM refs ──────────────────────────────────────────────
 const loginOverlay = document.getElementById('loginOverlay');
@@ -362,6 +376,89 @@ function showApp() {
   loginOverlay.style.display = 'none';
   appContent.style.display = 'block';
   loadFiles();
+  loadPasskeySettings();
+}
+
+// ── Passkey settings + admin UI ───────────────────────────
+async function loadPasskeySettings() {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    passkeyMode = s.passkey_mode === 'on';
+    passkeyRegistered = !!s.passkey_registered;
+    renderPasskeyUI();
+  } catch { /* settings are optional; ignore */ }
+}
+
+function renderPasskeyUI() {
+  const toggle = document.getElementById('passkeyModeToggle');
+  const status = document.getElementById('passkeyStatus');
+  const supportWarn = document.getElementById('passkeyUnsupported');
+  const supported = window.NyxPasskey && window.NyxPasskey.supported();
+
+  if (toggle) {
+    toggle.checked = passkeyMode;
+    toggle.disabled = !passkeyRegistered || !supported;
+  }
+  if (status) {
+    status.textContent = passkeyRegistered
+      ? (passkeyMode ? '🔑 Passkey-Modus AKTIV — Uploads werden mit Passkey verschlüsselt'
+                     : 'Passkey registriert · Modus aus (Passphrase-Verschlüsselung)')
+      : 'Kein Passkey registriert';
+  }
+  if (supportWarn) supportWarn.style.display = supported ? 'none' : 'block';
+
+  // Passphrase input hint: in passkey mode the upload passphrase is not needed.
+  const upPwRow = document.getElementById('uploadPassphraseRow');
+  const upPwLabel = document.getElementById('uploadPassphraseLabel');
+  const upPw = document.getElementById('uploadPassphrase');
+  if (upPwRow) upPwRow.style.display = passkeyMode ? 'none' : 'flex';
+  if (upPwLabel) upPwLabel.style.display = passkeyMode ? 'none' : 'block';
+  if (upPw) upPw.required = !passkeyMode;
+  const pkNote = document.getElementById('passkeyUploadNote');
+  if (pkNote) pkNote.style.display = passkeyMode ? 'block' : 'none';
+}
+
+async function registerPasskey() {
+  const btn = document.getElementById('registerPasskeyBtn');
+  if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
+    toast('Passkeys werden von diesem Browser nicht unterstützt', 'error');
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Warte auf Passkey…'; }
+  try {
+    const label = navigator.platform || 'Passkey';
+    const res = await window.NyxPasskey.register(sessionToken, label);
+    if (!res.prf_enabled) {
+      toast('⚠️ Passkey registriert, aber PRF wird NICHT unterstützt — Verschlüsselung geht auf diesem Gerät nicht. Anderes Gerät/Browser nutzen.', 'error');
+    } else {
+      toast('Passkey registriert! 🔑', 'success');
+    }
+    passkeyRegistered = true;
+    await loadPasskeySettings();
+  } catch (err) {
+    toast('Passkey-Registrierung fehlgeschlagen: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔑 Passkey registrieren'; }
+  }
+}
+
+async function togglePasskeyMode(on) {
+  try {
+    const res = await api('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passkey_mode: on ? 'on' : 'off' })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Fehler');
+    passkeyMode = data.passkey_mode === 'on';
+    passkeyRegistered = !!data.passkey_registered;
+    renderPasskeyUI();
+    toast(passkeyMode ? 'Passkey-Modus aktiviert 🔑' : 'Passkey-Modus deaktiviert', 'success');
+  } catch (err) {
+    toast('Konnte Einstellung nicht speichern: ' + err.message, 'error');
+    await loadPasskeySettings();
+  }
 }
 
 async function login() {
@@ -577,7 +674,17 @@ function cancelUpload() {
 async function uploadFile() {
   const uploadPw = (document.getElementById('uploadPassphrase')?.value || '').trim();
   if (!selectedFile) return;
-  if (!uploadPw) {
+
+  // Passkey mode: derive the key from the registered passkey (WebAuthn PRF)
+  // instead of a passphrase. A single get() ceremony yields the PRF secret,
+  // which is HKDF'd per-file. keyProvider(salt) plugs into the same NYX3 path.
+  let keyProvider = null;
+  if (passkeyMode) {
+    if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
+      toast('Passkeys werden von diesem Browser nicht unterstützt', 'error');
+      return;
+    }
+  } else if (!uploadPw) {
     toast('Please set a passphrase for this file', 'error');
     document.getElementById('uploadPassphrase')?.focus();
     return;
@@ -587,9 +694,17 @@ async function uploadFile() {
   uploadBtn.textContent = 'Encrypting...';
   progressContainer.classList.add('show');
   progressFill.style.width = '10%';
-  progressText.textContent = 'Encrypting file...';
+  progressText.textContent = passkeyMode ? 'Waiting for passkey…' : 'Encrypting file...';
 
   try {
+    if (passkeyMode) {
+      // Fetch the global PRF salt, run the ceremony once, and build a key provider.
+      const settings = await (await fetch('/api/settings')).json();
+      if (!settings.prf_salt) throw new Error('Server hat keinen PRF-Salt konfiguriert');
+      const prfOutput = await window.NyxPasskey.getPRF(settings.prf_salt);
+      keyProvider = (salt) => window.NyxPasskey.deriveKey(prfOutput, salt);
+    }
+
     // Read file
     const arrayBuffer = await selectedFile.arrayBuffer();
     const fileData = new Uint8Array(arrayBuffer);
@@ -602,14 +717,14 @@ async function uploadFile() {
       const pct = 20 + (done / total) * 30;
       progressFill.style.width = pct + '%';
       progressText.textContent = `Encrypting chunk ${done}/${total}...`;
-    });
+    }, keyProvider);
 
     progressFill.style.width = '50%';
     progressText.textContent = 'Encrypting metadata...';
 
     // Encrypt filename and content type
-    const filenameEnc = await encryptString(selectedFile.name, uploadPw);
-    const contentTypeEnc = await encryptString(selectedFile.type || 'application/octet-stream', uploadPw);
+    const filenameEnc = await encryptString(selectedFile.name, uploadPw, keyProvider);
+    const contentTypeEnc = await encryptString(selectedFile.type || 'application/octet-stream', uploadPw, keyProvider);
 
     // Calculate expiry
     let expiresAt = null;
@@ -628,6 +743,7 @@ async function uploadFile() {
     formData.append('filename_enc', filenameEnc);
     formData.append('content_type_enc', contentTypeEnc);
     formData.append('original_name', selectedFile.name);
+    if (passkeyMode) formData.append('key_mode', 'passkey');
     if (expiresAt) formData.append('expires_at', expiresAt);
     const burnEl = document.getElementById('burnCheckbox');
     if (burnEl && burnEl.checked) formData.append('burn_after_read', '1');
@@ -792,6 +908,12 @@ fileInput.addEventListener('change', handleFileDrop);
 
 uploadBtn.addEventListener('click', uploadFile);
 cancelBtn.addEventListener('click', cancelUpload);
+
+// Passkey admin controls
+const registerPasskeyBtn = document.getElementById('registerPasskeyBtn');
+if (registerPasskeyBtn) registerPasskeyBtn.addEventListener('click', registerPasskey);
+const passkeyModeToggle = document.getElementById('passkeyModeToggle');
+if (passkeyModeToggle) passkeyModeToggle.addEventListener('change', (e) => togglePasskeyMode(e.target.checked));
 
 // Upload passphrase show/hide toggle
 const toggleUploadPw = document.getElementById('toggleUploadPw');

@@ -2,6 +2,53 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.1.0] — 2026-07-11
+
+### 🔑 Passkey Encryption (WebAuthn PRF)
+
+Files can now optionally be encrypted with a **passkey** instead of a passphrase.
+Zero-knowledge is fully preserved — the encryption key is derived entirely in the
+browser from the WebAuthn PRF extension and never touches the server.
+
+#### How it works
+- **Key derivation:** `navigator.credentials.get()` requests the PRF extension
+  with `eval.first = <global prf_salt>`. The authenticator returns 32 secret
+  bytes, which are run through **HKDF-SHA256** (salt = the per-file blob salt,
+  info = `nyxvault-passkey-v1`) to produce the 32-byte XChaCha20-Poly1305 key.
+- **Same blob format:** passkey files use the exact same **NYX3** on-disk format
+  as passphrase files — only the key *source* differs. All chunk/HMAC integrity
+  protection is reused unchanged.
+- **One global PRF salt** (non-secret, stored in the new `settings` table) is
+  shared across all registered passkeys, so any of the owner's devices
+  (iPhone + Laptop, iCloud-synced) can decrypt any passkey-encrypted file.
+
+#### Added
+- **Global setting `passkey_mode`** (on/off) — toggled in the admin UI.
+  `GET /api/settings` (public) exposes `passkey_mode`, whether a passkey is
+  registered, and the non-secret `prf_salt`. `POST /api/settings` (admin only)
+  toggles the mode (refuses to enable it with no passkey registered).
+- **Passkey registration** in the admin UI ("🔑 Passkey registrieren"), backed by
+  `POST /api/webauthn/register/{options,verify}`. Supports **multiple** passkeys.
+  Credentials are stored in the new `passkeys` table.
+- **WebAuthn authentication ceremony** endpoints
+  `POST /api/webauthn/auth/{options,verify}` (public) for the download page,
+  with server-side counter tracking (anti-replay).
+- **Per-file `key_mode`** column (`passphrase` | `passkey`), returned in
+  `/api/dl/:token/meta`. The download page shows a *"Mit Passkey entschlüsseln"*
+  button for passkey files and keeps the passphrase input for passphrase files.
+- Configurable RP via env: `WEBAUTHN_RP_ID` (default `nyxvault.org`),
+  `WEBAUTHN_RP_NAME`, `WEBAUTHN_ORIGIN` (default `https://nyxvault.org`).
+- Dependency: `@simplewebauthn/server` for correct ceremony verification.
+
+#### Unchanged / compatibility
+- The **passphrase path is 100% intact** — API/CLI uploads (`nyx-upload.js`) stay
+  passphrase-based, all existing files decrypt exactly as before, and the NYX3
+  encryption format for passphrase files is byte-for-byte unchanged.
+- No CDN scripts added — `passkey.js` is served locally, so the strict CSP
+  (`script-src 'self'`) is untouched.
+
+---
+
 ## [2.0.2] — 2026-06-27
 
 ### 🔒 Security: dependency updates

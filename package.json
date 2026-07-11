@@ -1,6 +1,6 @@
 {
   "name": "nyxvault",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "End-to-end encrypted, zero-knowledge file sharing. Encrypt in your browser, share a link — the server never sees your data.",
   "main": "server.js",
   "type": "commonjs",
@@ -30,6 +30,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.2",
     "argon2": "^0.44.0",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",

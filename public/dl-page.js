@@ -22,12 +22,12 @@
   }
 
   // NYX3 decrypt (integrity-verified)
-  async function decryptDataNYX3(data, passphrase, onProgress) {
+  async function decryptDataNYX3(data, passphrase, onProgress, keyProvider) {
     let offset = 4;
     const salt = data.slice(offset, offset+SALT_BYTES); offset += SALT_BYTES;
     const storedHMAC = data.slice(offset, offset+32); offset += 32;
     const numChunks = (data[offset]<<24)|(data[offset+1]<<16)|(data[offset+2]<<8)|data[offset+3]; offset += 4;
-    const key = await deriveKey(passphrase, salt);
+    const key = keyProvider ? await keyProvider(salt) : await deriveKey(passphrase, salt);
     const hmacKey = await deriveHMACKey(key);
     // Verify header HMAC
     const hdr = new Uint8Array(4+SALT_BYTES+4);
@@ -61,8 +61,8 @@
     return result;
   }
 
-  async function decryptData(blob, passphrase, onProgress) {
-    if (isNYX3(blob)) return decryptDataNYX3(blob, passphrase, onProgress);
+  async function decryptData(blob, passphrase, onProgress, keyProvider) {
+    if (isNYX3(blob)) return decryptDataNYX3(blob, passphrase, onProgress, keyProvider);
     if (isNYX2(blob)) throw new Error('This file uses the legacy NYX2 format without integrity protection. Ask the uploader to migrate it using: node nyx-migrate.js');
     const salt = blob.slice(0, SALT_BYTES);
     const nonce = blob.slice(SALT_BYTES, SALT_BYTES+NONCE_BYTES);
@@ -77,8 +77,27 @@
     }
     throw new Error('Decryption failed \u2013 wrong passphrase?');
   }
-  async function decryptString(b64, passphrase) {
-    return nacl.util.encodeUTF8(await decryptData(nacl.util.decodeBase64(b64), passphrase));
+  async function decryptString(b64, passphrase, keyProvider) {
+    // Metadata strings use the legacy salt+nonce+ciphertext format (not NYX3).
+    const data = nacl.util.decodeBase64(b64);
+    const salt = data.slice(0, SALT_BYTES);
+    const nonce = data.slice(SALT_BYTES, SALT_BYTES+NONCE_BYTES);
+    const ct = data.slice(SALT_BYTES+NONCE_BYTES);
+    if (keyProvider) {
+      const key = await keyProvider(salt);
+      const dec = nacl.secretbox.open(ct, nonce, key);
+      if (dec) return nacl.util.encodeUTF8(dec);
+      throw new Error('Decryption failed \u2013 wrong passkey?');
+    }
+    for (const mem of [16384, 65536]) {
+      const key = new Uint8Array(await hashwasm.argon2id({
+        password: passphrase, salt, parallelism: 1, iterations: 3,
+        memorySize: mem, hashLength: 32, outputType: 'binary'
+      }));
+      const dec = nacl.secretbox.open(ct, nonce, key);
+      if (dec) return nacl.util.encodeUTF8(dec);
+    }
+    throw new Error('Decryption failed \u2013 wrong passphrase?');
   }
   async function fetchWithProgress(url, onProgress) {
     const r = await fetch(url);
@@ -166,14 +185,25 @@
     $('dlFileName').textContent = meta.original_name || 'Encrypted File';
     $('dlFileMeta').textContent = fmtSize(meta.size_bytes) + ' · ' + new Date(meta.upload_date).toLocaleDateString();
     if (meta.burn_after_read) { $('burnWarn').style.display = 'flex'; }
+    // Passkey-encrypted file: swap the passphrase form for a passkey button.
+    if (meta.key_mode === 'passkey') {
+      const pf = $('passphraseForm'); if (pf) pf.style.display = 'none';
+      const pb = $('passkeyDecryptWrap'); if (pb) pb.style.display = 'block';
+      if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
+        const pn = $('passkeyNote');
+        if (pn) { pn.textContent = '⚠️ Dieser Browser unterstützt keine Passkeys. Öffne den Link in einem Browser/Gerät mit Passkey-Unterstützung.'; pn.style.color = '#ffb4b4'; }
+        const btn = $('passkeyDecryptBtn'); if (btn) btn.disabled = true;
+      }
+    } else {
+      const pf = $('passphraseForm'); if (pf) pf.style.display = 'block';
+      const pb = $('passkeyDecryptWrap'); if (pb) pb.style.display = 'none';
+    }
     hide('loadingState'); show('fileState');
   }).catch(()=>{ hide('loadingState'); show('errorState'); });
 
-  // Decrypt flow
-  $('decryptForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const passphrase = $('dlPassphrase').value.trim();
-    if (!passphrase) return;
+  // Shared decrypt routine. Either `passphrase` (passphrase mode) or
+  // `keyProvider` (passkey mode: async (salt)=>Uint8Array(32)) is supplied.
+  async function runDecrypt(passphrase, keyProvider) {
     $('dlError').style.display = 'none';
     hide('fileState'); show('decryptingState');
     try {
@@ -188,18 +218,18 @@
       const decrypted = await decryptData(encryptedData, passphrase, (done, total) => {
         $('dlProgress').style.width = (55 + Math.round(done/total*30)) + '%';
         $('decryptStatus').textContent = 'Decrypting chunk ' + done + '/' + total + '…';
-      });
+      }, keyProvider);
       // Filename + content type
       $('decryptStatus').textContent = 'Finalizing…';
       $('dlProgress').style.width = '92%';
       decryptedFilename = 'decrypted_file';
       if (fileMeta.filename_enc) {
-        try { decryptedFilename = await decryptString(fileMeta.filename_enc, passphrase); }
+        try { decryptedFilename = await decryptString(fileMeta.filename_enc, passphrase, keyProvider); }
         catch { decryptedFilename = fileMeta.original_name || 'decrypted_file'; }
       }
       decryptedContentType = 'application/octet-stream';
       if (fileMeta.content_type_enc) {
-        try { decryptedContentType = await decryptString(fileMeta.content_type_enc, passphrase); } catch {}
+        try { decryptedContentType = await decryptString(fileMeta.content_type_enc, passphrase, keyProvider); } catch {}
       }
       $('dlProgress').style.width = '100%';
 
@@ -220,16 +250,54 @@
           .catch(()=>{});
       }
 
-      // Compute the SHA-256 hash LOCALLY (never leaves the browser) so the user
-      // can copy it. The VirusTotal lookup is strictly opt-in via a button —
-      // querying VT reveals the file's existence, so we never do it automatically.
       prepareHash(decrypted);
     } catch (err) {
       hide('decryptingState'); show('fileState');
       $('dlError').textContent = err.message; $('dlError').style.display = 'block';
       toast('Decryption failed', 'error');
     }
+  }
+
+  // Passphrase form
+  $('decryptForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const passphrase = $('dlPassphrase').value.trim();
+    if (!passphrase) return;
+    await runDecrypt(passphrase, null);
   });
+
+  // Passkey button: run the WebAuthn PRF ceremony → HKDF per-file key → decrypt.
+  const passkeyDecryptBtn = $('passkeyDecryptBtn');
+  if (passkeyDecryptBtn) {
+    passkeyDecryptBtn.addEventListener('click', async () => {
+      if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
+        $('dlError').textContent = 'Dieser Browser unterstützt keine Passkeys.';
+        $('dlError').style.display = 'block';
+        return;
+      }
+      const prfSalt = fileMeta && fileMeta.prf_salt;
+      if (!prfSalt) {
+        $('dlError').textContent = 'Für diese Datei fehlt der Passkey-Salt (Server-Konfiguration).';
+        $('dlError').style.display = 'block';
+        return;
+      }
+      passkeyDecryptBtn.disabled = true;
+      const origText = passkeyDecryptBtn.textContent;
+      passkeyDecryptBtn.textContent = 'Warte auf Passkey…';
+      try {
+        const prfOutput = await window.NyxPasskey.getPRF(prfSalt);
+        const keyProvider = (salt) => window.NyxPasskey.deriveKey(prfOutput, salt);
+        await runDecrypt(null, keyProvider);
+      } catch (err) {
+        $('dlError').textContent = err.message || 'Passkey-Entschlüsselung fehlgeschlagen';
+        $('dlError').style.display = 'block';
+        toast('Passkey fehlgeschlagen', 'error');
+      } finally {
+        passkeyDecryptBtn.disabled = false;
+        passkeyDecryptBtn.textContent = origText;
+      }
+    });
+  }
 
   // Map file extensions to MIME types (fallback when content-type is octet-stream)
   const EXT_MIME = {

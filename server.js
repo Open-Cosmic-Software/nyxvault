@@ -32,6 +32,18 @@ const WEB_PASSWORD = process.env.WEB_PASSWORD;
 const SESSION_SECRET = process.env.SESSION_SECRET;
 const MAX_FILE_SIZE = (parseInt(process.env.MAX_FILE_SIZE_MB) || 100) * 1024 * 1024;
 const VT_API_KEY = process.env.VT_API_KEY || '';
+// WebAuthn / passkey configuration. RP ID + origin must match the public
+// hostname (Caddy) — never localhost, or the browser rejects the ceremony.
+const WEBAUTHN_RP_ID = process.env.WEBAUTHN_RP_ID || 'nyxvault.org';
+const WEBAUTHN_RP_NAME = process.env.WEBAUTHN_RP_NAME || 'NyxVault';
+const WEBAUTHN_ORIGIN = process.env.WEBAUTHN_ORIGIN || 'https://nyxvault.org';
+
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
 
 // Cache the download page HTML (with cachebust injected)
 const DL_PAGE_HTML = (() => {
@@ -90,12 +102,64 @@ db.exec(`
     db.exec(`ALTER TABLE files ADD COLUMN downloaded_at TEXT`);
     console.log('[MIGRATE] added column downloaded_at');
   }
+  // Per-file key mode: 'passphrase' (default, Argon2id) or 'passkey' (WebAuthn PRF).
+  // Old files have no column → default to 'passphrase' so nothing breaks.
+  if (!cols.includes('key_mode')) {
+    db.exec(`ALTER TABLE files ADD COLUMN key_mode TEXT NOT NULL DEFAULT 'passphrase'`);
+    console.log('[MIGRATE] added column key_mode');
+  }
 })();
+
+// ── Settings table (global key/value config) ──────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+`);
+const stmtGetSetting = db.prepare(`SELECT value FROM settings WHERE key = ?`);
+const stmtSetSetting = db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+function getSetting(key, fallback = null) {
+  const row = stmtGetSetting.get(key);
+  return row ? row.value : fallback;
+}
+function setSetting(key, value) { stmtSetSetting.run(key, String(value)); }
+
+// One global PRF salt, shared across every registered passkey so that ANY of
+// Fabian's devices (iPhone + Laptop, iCloud-synced or not) can decrypt ANY
+// passkey-encrypted file. The salt is not secret — it's a domain-separation
+// nonce for the PRF evaluation — so it's safe to expose to the download page.
+// Generated exactly once on first boot.
+if (!getSetting('prf_salt')) {
+  setSetting('prf_salt', crypto.randomBytes(32).toString('base64'));
+  console.log('[INIT] generated global PRF salt');
+}
+if (!getSetting('passkey_mode')) setSetting('passkey_mode', 'off');
+
+// ── Passkeys table (WebAuthn credentials) ─────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS passkeys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cred_id TEXT NOT NULL UNIQUE,
+    public_key TEXT NOT NULL,
+    counter INTEGER NOT NULL DEFAULT 0,
+    transports TEXT,
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+const stmtInsertPasskey = db.prepare(`INSERT INTO passkeys (cred_id, public_key, counter, transports, label) VALUES (?, ?, ?, ?, ?)`);
+const stmtGetAllPasskeys = db.prepare(`SELECT * FROM passkeys ORDER BY created_at ASC`);
+const stmtGetPasskeyByCredId = db.prepare(`SELECT * FROM passkeys WHERE cred_id = ?`);
+const stmtUpdatePasskeyCounter = db.prepare(`UPDATE passkeys SET counter = ? WHERE cred_id = ?`);
+const stmtDeletePasskey = db.prepare(`DELETE FROM passkeys WHERE id = ?`);
+const stmtCountPasskeys = db.prepare(`SELECT COUNT(*) AS c FROM passkeys`);
 
 // Prepared statements
 const stmtInsert = db.prepare(`
-  INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name, burn_after_read)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name, burn_after_read, key_mode)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const stmtMarkDownloaded = db.prepare(`UPDATE files SET downloaded_at = datetime('now') WHERE id = ?`);
 const stmtGetAll = db.prepare(`SELECT * FROM files ORDER BY upload_date DESC`);
@@ -299,6 +363,8 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
     }
     const nonce = req.body.nonce || '';
     const burnAfterRead = (req.body.burn_after_read === '1' || req.body.burn_after_read === 'true' || req.body.burn_after_read === true) ? 1 : 0;
+    // Per-file key mode: 'passkey' (WebAuthn PRF) or 'passphrase' (default).
+    const keyMode = (req.body.key_mode === 'passkey') ? 'passkey' : 'passphrase';
     // Don't store original filename (privacy: zero-knowledge)
     const originalName = 'redacted';
 
@@ -317,7 +383,8 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
       expiresAt,
       nonce,
       originalName,
-      burnAfterRead
+      burnAfterRead,
+      keyMode
     );
 
     const file = stmtGetById.get(result.lastInsertRowid);
@@ -331,7 +398,8 @@ app.post('/api/upload', uploadLimiter, authAny, upload.single('file'), (req, res
       size_bytes: fileSize,
       upload_date: file.upload_date,
       expires_at: file.expires_at || null,
-      burn_after_read: !!file.burn_after_read
+      burn_after_read: !!file.burn_after_read,
+      key_mode: file.key_mode || 'passphrase'
     });
   } catch (err) {
     console.error('Upload error:', err);
@@ -517,7 +585,11 @@ app.get('/api/dl/:token/meta', downloadLimiter, (req, res) => {
       upload_date: file.upload_date,
       uploader: file.uploader,
       nonce: file.nonce,
-      burn_after_read: !!file.burn_after_read
+      burn_after_read: !!file.burn_after_read,
+      key_mode: file.key_mode || 'passphrase',
+      // The PRF salt is a non-secret domain-separation nonce; the download page
+      // needs it to re-derive the same key from the visitor's passkey.
+      prf_salt: (file.key_mode === 'passkey') ? getSetting('prf_salt') : undefined
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
@@ -588,9 +660,222 @@ app.post('/api/dl/:token/burn', downloadLimiter, (req, res) => {
   }
 });
 
+// ── Settings ──────────────────────────────────────────────
+// Public GET: exposes only what the download/upload page needs — whether
+// passkey mode is on and whether at least one passkey exists. The PRF salt is
+// not secret and is included so the client can derive keys.
+app.get('/api/settings', (req, res) => {
+  try {
+    const passkeyMode = getSetting('passkey_mode', 'off');
+    const passkeyCount = stmtCountPasskeys.get().c;
+    return res.json({
+      passkey_mode: passkeyMode,
+      passkey_registered: passkeyCount > 0,
+      passkey_count: passkeyCount,
+      prf_salt: getSetting('prf_salt')
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Authenticated POST: toggle passkey_mode. Refuses to turn it ON if no passkey
+// is registered yet (would make the upload UI unusable).
+app.post('/api/settings', authWeb, (req, res) => {
+  try {
+    const { passkey_mode } = req.body || {};
+    if (passkey_mode !== undefined) {
+      const val = (passkey_mode === 'on' || passkey_mode === true || passkey_mode === '1') ? 'on' : 'off';
+      if (val === 'on' && stmtCountPasskeys.get().c === 0) {
+        return res.status(400).json({ error: 'Register a passkey before enabling passkey mode.' });
+      }
+      setSetting('passkey_mode', val);
+    }
+    const passkeyCount = stmtCountPasskeys.get().c;
+    return res.json({
+      ok: true,
+      passkey_mode: getSetting('passkey_mode', 'off'),
+      passkey_registered: passkeyCount > 0,
+      passkey_count: passkeyCount
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── WebAuthn / Passkeys ───────────────────────────────────
+// Ceremony challenges are short-lived, kept in memory keyed by session token
+// (registration is admin-only) or a random flow id (public authentication).
+const webauthnChallenges = new Map();
+function putChallenge(id, challenge) {
+  webauthnChallenges.set(id, { challenge, expires: Date.now() + 5 * 60 * 1000 });
+}
+function takeChallenge(id) {
+  const c = webauthnChallenges.get(id);
+  webauthnChallenges.delete(id);
+  if (!c || c.expires < Date.now()) return null;
+  return c.challenge;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of webauthnChallenges) if (v.expires < now) webauthnChallenges.delete(k);
+}, 5 * 60 * 1000);
+
+// List registered passkeys (admin only)
+app.get('/api/passkeys', authWeb, (req, res) => {
+  try {
+    const rows = stmtGetAllPasskeys.all().map(p => ({
+      id: p.id, label: p.label, created_at: p.created_at,
+      cred_id_short: p.cred_id.slice(0, 12)
+    }));
+    return res.json({ passkeys: rows });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Delete a passkey (admin only). If it was the last one, auto-disable passkey mode.
+app.delete('/api/passkeys/:id', authWeb, (req, res) => {
+  try {
+    stmtDeletePasskey.run(parseInt(req.params.id));
+    if (stmtCountPasskeys.get().c === 0) setSetting('passkey_mode', 'off');
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Registration: generate options (admin only). Requests the PRF extension so
+// the credential can later produce a stable secret for key derivation.
+app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
+  try {
+    const existing = stmtGetAllPasskeys.all();
+    const options = await generateRegistrationOptions({
+      rpName: WEBAUTHN_RP_NAME,
+      rpID: WEBAUTHN_RP_ID,
+      userName: 'nyxvault-owner',
+      userDisplayName: 'NyxVault Owner',
+      attestationType: 'none',
+      excludeCredentials: existing.map(p => ({
+        id: p.cred_id,
+        transports: p.transports ? JSON.parse(p.transports) : undefined
+      })),
+      authenticatorSelection: {
+        residentKey: 'required',
+        userVerification: 'preferred'
+      },
+      extensions: { prf: {} }
+    });
+    const token = req.headers['x-session-token'];
+    putChallenge('reg:' + token, options.challenge);
+    return res.json(options);
+  } catch (err) {
+    console.error('Register options error:', err);
+    return res.status(500).json({ error: 'Could not generate registration options' });
+  }
+});
+
+// Registration: verify response (admin only) and persist the credential.
+app.post('/api/webauthn/register/verify', authWeb, async (req, res) => {
+  try {
+    const token = req.headers['x-session-token'];
+    const expectedChallenge = takeChallenge('reg:' + token);
+    if (!expectedChallenge) return res.status(400).json({ error: 'Challenge expired — try again.' });
+    const { credential, label } = req.body || {};
+    if (!credential) return res.status(400).json({ error: 'Missing credential' });
+
+    const verification = await verifyRegistrationResponse({
+      response: credential,
+      expectedChallenge,
+      expectedOrigin: WEBAUTHN_ORIGIN,
+      expectedRPID: WEBAUTHN_RP_ID,
+      requireUserVerification: false
+    });
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: 'Passkey verification failed' });
+    }
+    const cred = verification.registrationInfo.credential;
+    const credId = cred.id;
+    const publicKeyB64 = Buffer.from(cred.publicKey).toString('base64');
+    const counter = cred.counter || 0;
+    const transports = credential.response && credential.response.transports
+      ? JSON.stringify(credential.response.transports) : null;
+
+    if (stmtGetPasskeyByCredId.get(credId)) {
+      return res.status(409).json({ error: 'This passkey is already registered.' });
+    }
+    const prfEnabled = !!(credential.clientExtensionResults &&
+      credential.clientExtensionResults.prf &&
+      credential.clientExtensionResults.prf.enabled);
+
+    stmtInsertPasskey.run(credId, publicKeyB64, counter, transports,
+      (label && String(label).slice(0, 64)) || 'Passkey');
+    console.log('[PASSKEY] registered ' + credId.slice(0, 12) + '… (prf=' + prfEnabled + ')');
+    return res.json({ ok: true, prf_enabled: prfEnabled, cred_id_short: credId.slice(0, 12) });
+  } catch (err) {
+    console.error('Register verify error:', err);
+    return res.status(500).json({ error: 'Passkey registration failed: ' + err.message });
+  }
+});
+
+// Authentication: generate options (public).
+app.post('/api/webauthn/auth/options', downloadLimiter, async (req, res) => {
+  try {
+    const passkeys = stmtGetAllPasskeys.all();
+    const options = await generateAuthenticationOptions({
+      rpID: WEBAUTHN_RP_ID,
+      userVerification: 'preferred',
+      allowCredentials: passkeys.map(p => ({
+        id: p.cred_id,
+        transports: p.transports ? JSON.parse(p.transports) : undefined
+      }))
+    });
+    const flowId = crypto.randomBytes(16).toString('hex');
+    putChallenge('auth:' + flowId, options.challenge);
+    return res.json({ ...options, flowId });
+  } catch (err) {
+    console.error('Auth options error:', err);
+    return res.status(500).json({ error: 'Could not generate authentication options' });
+  }
+});
+
+// Authentication: verify response (public). Bumps the counter (anti-replay).
+// The decryption key comes from the client-side PRF result — never the server.
+app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
+  try {
+    const { credential, flowId } = req.body || {};
+    if (!credential || !flowId) return res.status(400).json({ error: 'Missing credential' });
+    const expectedChallenge = takeChallenge('auth:' + flowId);
+    if (!expectedChallenge) return res.status(400).json({ error: 'Challenge expired — try again.' });
+
+    const dbCred = stmtGetPasskeyByCredId.get(credential.id);
+    if (!dbCred) return res.status(404).json({ error: 'Unknown passkey' });
+
+    const verification = await verifyAuthenticationResponse({
+      response: credential,
+      expectedChallenge,
+      expectedOrigin: WEBAUTHN_ORIGIN,
+      expectedRPID: WEBAUTHN_RP_ID,
+      requireUserVerification: false,
+      credential: {
+        id: dbCred.cred_id,
+        publicKey: new Uint8Array(Buffer.from(dbCred.public_key, 'base64')),
+        counter: dbCred.counter,
+        transports: dbCred.transports ? JSON.parse(dbCred.transports) : undefined
+      }
+    });
+    if (!verification.verified) return res.status(400).json({ error: 'Passkey authentication failed' });
+    stmtUpdatePasskeyCounter.run(verification.authenticationInfo.newCounter, dbCred.cred_id);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Auth verify error:', err);
+    return res.status(500).json({ error: 'Passkey authentication failed: ' + err.message });
+  }
+});
+
 // ── Health ────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nyxvault', version: '2.0.1', uptime: process.uptime() });
+  res.json({ status: 'ok', service: 'nyxvault', version: '2.1.0', uptime: process.uptime() });
 });
 
 // ── Session cleanup (every 30min) ─────────────────────────
@@ -622,8 +907,13 @@ setInterval(() => {
 }, 30 * 60 * 1000);
 
 // ── Start ─────────────────────────────────────────────────
-app.listen(PORT, '127.0.0.1', () => {
+const httpServer = app.listen(PORT, '127.0.0.1', () => {
   console.log(`🔐 NyxVault running on http://127.0.0.1:${PORT}`);
   console.log(`   Storage: ${STORAGE_DIR}`);
   console.log(`   Database: ${DB_PATH}`);
 });
+// Allow long uploads (large encrypted backups) without aborting mid-transfer
+httpServer.requestTimeout = 0;          // no overall request timeout
+httpServer.headersTimeout = 5 * 60 * 1000;
+httpServer.keepAliveTimeout = 10 * 60 * 1000;
+httpServer.timeout = 0;                 // disable socket inactivity timeout
