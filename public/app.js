@@ -476,6 +476,7 @@ async function loadPasskeySettings() {
     }
     renderPasskeyUI();
     loadPasskeyList();
+    loadRecoveryStatus();
   } catch { /* settings are optional; ignore */ }
 }
 
@@ -517,6 +518,101 @@ function renderUploadModeUI() {
   if (upPwLabel) upPwLabel.style.display = showPw ? 'block' : 'none';
   if (upPw) upPw.required = showPw;
   if (pkNote) pkNote.style.display = pkActive ? 'block' : 'none';
+}
+
+// ── Agent recovery key ────────────────────────────────────
+// A software recovery key lets the server host's agent (Nyx) decrypt
+// PASSKEY-mode files without a biometric authenticator. Setting one up needs
+// exactly ONE passkey tap (to unwrap the vault key locally); the vault private
+// key is sealed to the recovery public key in the browser and never travels
+// in plaintext. Opt-in trade-off: reduces zero-knowledge for passkey files.
+async function loadRecoveryStatus() {
+  const note = document.getElementById('recoveryNote');
+  const status = document.getElementById('recoveryStatus');
+  const addBtn = document.getElementById('addRecoveryBtn');
+  const rmBtn = document.getElementById('removeRecoveryBtn');
+  const warn = document.getElementById('recoveryWarn');
+  if (!note || !status) return;
+  if (!passkeyRegistered || !vaultPubkey) { note.style.display = 'none'; return; }
+  note.style.display = 'block';
+  try {
+    const res = await api('/api/recovery');
+    const data = await res.json();
+    const active = (data.recovery_keys || []).filter(r => r.finalized);
+    window._recoveryKeys = data.recovery_keys || [];
+    if (active.length) {
+      const r = active[active.length - 1];
+      status.textContent = 'ACTIVE — "' + (r.label || 'recovery key') + '" (created ' + new Date(r.created_at + 'Z').toLocaleDateString('en-GB') + '). The agent on the server can decrypt passkey-mode files.';
+      if (addBtn) addBtn.style.display = 'none';
+      if (rmBtn) rmBtn.style.display = 'inline-block';
+      if (warn) warn.style.display = 'block';
+    } else {
+      status.textContent = 'not set up. Add one so the agent (Nyx) can decrypt passkey-mode files via the CLI — takes one passkey tap.';
+      if (addBtn) addBtn.style.display = 'inline-block';
+      if (rmBtn) rmBtn.style.display = 'none';
+      if (warn) warn.style.display = 'none';
+    }
+  } catch { status.textContent = 'status unavailable.'; }
+}
+
+async function addRecoveryKey() {
+  const btn = document.getElementById('addRecoveryBtn');
+  if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
+    toast('Passkeys are not supported by this browser', 'error');
+    return;
+  }
+  const ok = await nyxConfirm('🦞 Add an agent recovery key?',
+    'This creates a software recovery key on the server so the agent (Nyx) can decrypt PASSKEY-mode files from the command line — no biometrics needed.\n\n⚠️ Trade-off: whoever controls the server\'s recovery key file can decrypt all passkey-mode files. This intentionally reduces zero-knowledge for passkey files (passphrase files stay fully zero-knowledge).\n\nYou will be asked for ONE passkey tap to authorise the wrap.',
+    { okLabel: 'Create recovery key' });
+  if (!ok) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Waiting for passkey…'; }
+  try {
+    // 1) Server generates the recovery keypair (private key stays in a
+    //    chmod-600 file on the host) and returns the public key.
+    const initRes = await api('/api/recovery/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: 'Agent recovery key' })
+    });
+    const init = await initRes.json();
+    if (!initRes.ok) throw new Error(init.error || 'Could not create recovery key');
+    // 2) One passkey ceremony: unwrap the vault private key locally and seal
+    //    it to the recovery public key. Never leaves the browser unencrypted.
+    const wrappedB64 = await window.NyxPasskey.wrapVaultKeyForRecovery(init.passkeys, init.recovery_pubkey);
+    // 3) Store the wrap.
+    const finRes = await api('/api/recovery/finalize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recovery_id: init.recovery_id, wrapped_privkey: wrappedB64 })
+    });
+    const fin = await finRes.json();
+    if (!finRes.ok || !fin.ok) throw new Error(fin.error || 'Could not finalize recovery key');
+    toast('Recovery key active — the agent can now decrypt passkey-mode files 🦞', 'success');
+    await nyxConfirm('🦞 Recovery key is active', 'The agent (Nyx) can now decrypt passkey-mode files on the server via nyx-decrypt.js --recovery.\n\n⚠️ Remember: this recovery key lets the server operator decrypt all passkey-mode files. Delete it here at any time to revoke that ability. Passphrase-mode files are not affected and remain fully zero-knowledge.', { okLabel: 'Understood' });
+  } catch (err) {
+    toast('Recovery key setup failed: ' + err.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '＋ Add recovery key'; }
+    loadRecoveryStatus();
+  }
+}
+
+async function removeRecoveryKey() {
+  const keys = window._recoveryKeys || [];
+  if (!keys.length) return;
+  const ok = await nyxConfirm('Remove the recovery key?',
+    'The agent (Nyx) will no longer be able to decrypt passkey-mode files from the CLI. Your passkeys keep working as before. You can add a new recovery key at any time.',
+    { okLabel: 'Remove', danger: true });
+  if (!ok) return;
+  try {
+    for (const r of keys) {
+      await api('/api/recovery/' + r.id, { method: 'DELETE' });
+    }
+    toast('Recovery key removed', 'success');
+  } catch (err) {
+    toast('Could not remove recovery key: ' + err.message, 'error');
+  }
+  loadRecoveryStatus();
 }
 
 // ── Passkey management table ──────────────────────────────
@@ -1122,6 +1218,10 @@ cancelBtn.addEventListener('click', cancelUpload);
 // Passkey admin controls
 const registerPasskeyBtn = document.getElementById('registerPasskeyBtn');
 if (registerPasskeyBtn) registerPasskeyBtn.addEventListener('click', registerPasskey);
+const addRecoveryBtn = document.getElementById('addRecoveryBtn');
+if (addRecoveryBtn) addRecoveryBtn.addEventListener('click', addRecoveryKey);
+const removeRecoveryBtn = document.getElementById('removeRecoveryBtn');
+if (removeRecoveryBtn) removeRecoveryBtn.addEventListener('click', removeRecoveryKey);
 
 // "Use passphrase instead" toggle (makes a single upload passphrase-only).
 const usePassphraseToggle = document.getElementById('usePassphraseToggle');

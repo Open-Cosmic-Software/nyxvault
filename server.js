@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const rateLimit = require('express-rate-limit');
 const argon2 = require('argon2');
+const nacl = require('tweetnacl');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
@@ -107,7 +108,10 @@ function parseDuration(str) {
 }
 
 // ── Database ──────────────────────────────────────────────
-const DB_PATH = path.join(__dirname, 'data', 'vault.db');
+// NYXVAULT_DB / NYXVAULT_STORAGE / NYXVAULT_RECOVERY_KEY are overridable via
+// env so a test instance can run against throwaway paths without ever touching
+// the production database.
+const DB_PATH = process.env.NYXVAULT_DB || path.join(__dirname, 'data', 'vault.db');
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
@@ -241,6 +245,35 @@ const stmtCountPasskeys = db.prepare(`SELECT COUNT(*) AS c FROM passkeys`);
 const stmtRenamePasskey = db.prepare(`UPDATE passkeys SET label = ? WHERE id = ?`);
 const stmtGetPasskeyById = db.prepare(`SELECT * FROM passkeys WHERE id = ?`);
 
+// ── Recovery keys table (agent access to passkey-mode files) ────────────────
+// A recovery key is a SOFTWARE X25519 keypair. The private key lives in a
+// chmod-600 JSON file on the server host (outside git), controlled by the
+// operator/agent (Nyx). Its row stores:
+//   • pubkey           — the recovery public key (base64)
+//   • wrapped_privkey  — the VAULT private key sealed to the recovery public
+//                        key (anonymous sealed box, same format as wrapped_fek)
+// The wrap can only be produced in a browser after a passkey ceremony (only a
+// passkey can unwrap the vault private key) — hence the init/finalize split.
+// ⚠️ Trade-off (opt-in, explicit): with a finalized recovery key the server
+// HOST can decrypt passkey-mode files. Passphrase files stay zero-knowledge.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS recovery_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    label TEXT,
+    pubkey TEXT NOT NULL,
+    wrapped_privkey TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+const stmtInsertRecovery = db.prepare(`INSERT INTO recovery_keys (label, pubkey) VALUES (?, ?)`);
+const stmtGetRecoveryById = db.prepare(`SELECT * FROM recovery_keys WHERE id = ?`);
+const stmtFinalizeRecovery = db.prepare(`UPDATE recovery_keys SET wrapped_privkey = ? WHERE id = ?`);
+const stmtGetAllRecovery = db.prepare(`SELECT * FROM recovery_keys ORDER BY created_at ASC`);
+const stmtDeleteRecovery = db.prepare(`DELETE FROM recovery_keys WHERE id = ?`);
+const stmtDeleteAllRecovery = db.prepare(`DELETE FROM recovery_keys`);
+// Where the recovery PRIVATE key file lives (never in git, chmod 600).
+const RECOVERY_KEY_PATH = process.env.NYXVAULT_RECOVERY_KEY || path.join(__dirname, 'data', 'recovery-key.json');
+
 // Prepared statements
 const stmtInsert = db.prepare(`
   INSERT INTO files (filename_enc, uploader, size_bytes, download_token, content_type_enc, expires_at, nonce, original_name, burn_after_read, key_mode, wrapped_fek)
@@ -259,7 +292,7 @@ const stmtGetByToken = db.prepare(`SELECT * FROM files WHERE download_token = ?`
 const stmtDelete = db.prepare(`DELETE FROM files WHERE id = ?`);
 
 // ── Storage ───────────────────────────────────────────────
-const STORAGE_DIR = path.join(__dirname, 'storage');
+const STORAGE_DIR = process.env.NYXVAULT_STORAGE || path.join(__dirname, 'storage');
 if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
 
 // Best-effort secure delete: overwrite the file with random bytes before
@@ -892,6 +925,8 @@ app.delete('/api/passkeys/:id', authWeb, (req, res) => {
       // pubkey so a future registration starts a clean new vault.
       db.prepare(`DELETE FROM settings WHERE key = 'vault_pubkey'`).run();
       console.log('[PASSKEY] last passkey removed — vault pubkey cleared');
+      // Recovery keys wrap the (now dead) vault private key — useless, drop them.
+      stmtDeleteAllRecovery.run();
     }
     return res.json({ ok: true, was_last: isLast });
   } catch (err) {
@@ -1061,6 +1096,106 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
   } catch (err) {
     console.error('Auth verify error:', err);
     return res.status(500).json({ error: 'Passkey authentication failed: ' + err.message });
+  }
+});
+
+// ── Recovery key (agent decryption) ──────────────────────────────────────────
+// Lets the server operator's agent (Nyx) decrypt PASSKEY-mode files without a
+// biometric authenticator. Flow:
+//   1. POST /api/recovery/init (admin): server generates an X25519 keypair,
+//      writes the PRIVATE key to RECOVERY_KEY_PATH (chmod 600, outside git)
+//      and returns the PUBLIC key + the registered passkeys' wrapping data.
+//   2. The BROWSER runs one passkey ceremony, unwraps the vault private key
+//      locally and seals it to the recovery public key (sealed box — the
+//      server never sees the vault private key in plaintext at any point).
+//   3. POST /api/recovery/finalize (admin) stores that wrap.
+// Afterwards the CLI (nyx-decrypt.js --recovery, on the server host) can open
+// the wrap with the recovery private key file and decrypt passkey-mode files.
+app.get('/api/recovery', authWeb, (req, res) => {
+  try {
+    const rows = stmtGetAllRecovery.all().map(r => ({
+      id: r.id,
+      label: r.label,
+      created_at: r.created_at,
+      finalized: !!r.wrapped_privkey,
+      pubkey_short: (r.pubkey || '').slice(0, 12)
+    }));
+    return res.json({ recovery_keys: rows, count: rows.length });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/recovery/init', authWeb, (req, res) => {
+  try {
+    if (!getSetting('vault_pubkey')) {
+      return res.status(400).json({ error: 'No passkey vault exists yet — register a passkey first.' });
+    }
+    const label = (req.body && req.body.label ? String(req.body.label) : 'Agent recovery key').trim().slice(0, 64) || 'Agent recovery key';
+    // Generate the recovery keypair server-side: the whole point is that the
+    // PRIVATE key ends up in a file the agent on this host can read.
+    const kp = nacl.box.keyPair();
+    const pubB64 = Buffer.from(kp.publicKey).toString('base64');
+    const result = stmtInsertRecovery.run(label, pubB64);
+    const recoveryId = result.lastInsertRowid;
+    const keyFile = {
+      id: recoveryId,
+      label,
+      publicKey: pubB64,
+      privateKey: Buffer.from(kp.secretKey).toString('base64'),
+      created: new Date().toISOString(),
+      note: 'NyxVault recovery private key. Anyone with this file + DB access can decrypt passkey-mode files. chmod 600, never commit.'
+    };
+    fs.mkdirSync(path.dirname(RECOVERY_KEY_PATH), { recursive: true });
+    fs.writeFileSync(RECOVERY_KEY_PATH, JSON.stringify(keyFile, null, 2) + '\n', { mode: 0o600 });
+    try { fs.chmodSync(RECOVERY_KEY_PATH, 0o600); } catch {}
+    kp.secretKey.fill(0);
+    console.log('[RECOVERY] generated recovery keypair #' + recoveryId + ' → ' + RECOVERY_KEY_PATH);
+    // The browser needs the passkeys' wrapping data to run the unwrap ceremony.
+    const passkeys = stmtGetAllPasskeys.all().map(p => ({
+      cred_id: p.cred_id,
+      prf_salt: p.prf_salt,
+      wrapped_privkey: p.wrapped_privkey,
+      transports: parseTransports(p.transports)
+    }));
+    return res.json({ recovery_id: recoveryId, recovery_pubkey: pubB64, passkeys });
+  } catch (err) {
+    console.error('Recovery init error:', err);
+    return res.status(500).json({ error: 'Could not create recovery key' });
+  }
+});
+
+app.post('/api/recovery/finalize', authWeb, (req, res) => {
+  try {
+    const { recovery_id, wrapped_privkey } = req.body || {};
+    const row = stmtGetRecoveryById.get(parseInt(recovery_id));
+    if (!row) return res.status(404).json({ error: 'Unknown recovery key' });
+    if (row.wrapped_privkey) return res.status(409).json({ error: 'This recovery key is already finalized' });
+    if (!wrapped_privkey || typeof wrapped_privkey !== 'string' || wrapped_privkey.length > 4096) {
+      return res.status(400).json({ error: 'Missing or invalid wrapped_privkey' });
+    }
+    stmtFinalizeRecovery.run(wrapped_privkey, row.id);
+    console.log('[RECOVERY] finalized recovery key #' + row.id + ' — agent decryption is now possible');
+    return res.json({ ok: true, recovery_id: row.id });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/recovery/:id', authWeb, (req, res) => {
+  try {
+    const row = stmtGetRecoveryById.get(parseInt(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Recovery key not found' });
+    stmtDeleteRecovery.run(row.id);
+    // Best-effort: remove the private key file if it belongs to this entry.
+    try {
+      const kf = JSON.parse(fs.readFileSync(RECOVERY_KEY_PATH, 'utf8'));
+      if (kf && kf.id === row.id) fs.unlinkSync(RECOVERY_KEY_PATH);
+    } catch {}
+    console.log('[RECOVERY] deleted recovery key #' + row.id);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Server error' });
   }
 });
 

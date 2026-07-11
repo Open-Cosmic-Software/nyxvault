@@ -11,3 +11,4 @@ public/landing.js
 landing.nyx
 .DS_Store
 npm-debug.log*
+data/recovery-key.json

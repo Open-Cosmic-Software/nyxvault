@@ -185,6 +185,33 @@ Key properties:
 - Files can still be made **passphrase-only** per upload (“use a passphrase
   instead”), and passphrase files work exactly as before.
 
+### 🦞 Agent recovery key (optional)
+
+Passkey-mode files can normally only be opened in a browser with a registered
+passkey. If you run NyxVault with an automated agent on the host, you can grant
+it CLI decryption via an **opt-in software recovery key**:
+
+```
+Admin → Passkeys card → “Add recovery key”  (one passkey tap to authorise)
+```
+
+- The server generates an X25519 recovery keypair; the private key is written to
+  `data/recovery-key.json` (chmod 600, git-ignored, never leaves the host).
+- Your browser runs **one** passkey ceremony, unwraps the vault private key
+  locally and seals it to the recovery public key — the vault private key never
+  travels in plaintext.
+- The agent then decrypts on the host:
+  ```bash
+  node nyx-decrypt.js <encrypted.bin> --recovery [output] [--token <hex>]
+  ```
+  chaining recovery key → vault private key → file key (FEK) → file.
+
+> ⚠️ **Trade-off (explicit, opt-in):** a finalised recovery key lets whoever
+> controls the recovery-key file + database decrypt **passkey-mode** files. This
+> intentionally reduces zero-knowledge for passkey files only. **Passphrase-mode
+> files stay fully zero-knowledge** — the recovery key cannot touch them. Remove
+> the recovery key anytime in the admin UI to revoke agent access.
+
 ## 🔒 Security Model
 
 | Property | How |
@@ -194,6 +221,7 @@ Key properties:
 | **Filename privacy** | The original filename and content type are themselves encrypted; the server stores `redacted`. |
 | **Passphrase** | Never transmitted. Not stored. Not recoverable. |
 | **Passkeys** | WebAuthn PRF output never leaves the browser (client extension results are stripped before anything is sent). The vault private key exists only wrapped under per-passkey KEKs; file keys only sealed to the vault public key. |
+| **Agent recovery key** | Optional + opt-in. The recovery private key lives in a chmod-600, git-ignored file on the host; the vault key is sealed to it in the browser during a one-time passkey ceremony. Affects **passkey-mode files only** — passphrase files remain fully zero-knowledge. Revocable in the admin UI. |
 | **VirusTotal** | **Opt-in only** — never automatic. The SHA-256 hash is computed client-side and shown locally; it's sent to VirusTotal only on explicit user click. The file is never uploaded to VT. A clear privacy note warns that even a hash query reveals the file's existence — so users can skip it for sensitive, unique files. |
 | **Burn after reading** | The server only deletes the file after the client confirms a *successful* decryption, so a wrong passphrase can never destroy a file. The ciphertext blob is single-use (a server-side lock refuses a second fetch) and is overwritten with random bytes before unlink (best-effort secure delete). |
 | **Transport** | Bind to localhost + TLS-terminating reverse proxy. Strict CSP (`script-src 'self' 'wasm-unsafe-eval'` — no inline scripts; plus `object-src 'none'`, `base-uri 'self'`, `form-action 'self'`), `X-Frame-Options: DENY`. PDF previews run in a sandboxed iframe. |

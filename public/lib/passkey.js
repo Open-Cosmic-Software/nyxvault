@@ -396,6 +396,40 @@ async function unsealFEK(passkeys, wrappedFekB64) {
   return fek; // Uint8Array(32)
 }
 
+// ── Recovery key setup: wrap the vault private key for a recovery pubkey ────
+// Runs ONE passkey ceremony to unwrap the vault private key locally, then
+// seals it to the given recovery PUBLIC key (server-generated software key).
+// The vault private key never leaves this function unencrypted.
+// `passkeys`: [{ cred_id, prf_salt, wrapped_privkey, transports }]
+// Returns the wrap as base64 (to be sent to /api/recovery/finalize).
+async function wrapVaultKeyForRecovery(passkeys, recoveryPubB64) {
+  if (!passkeySupported()) throw new Error('This browser does not support passkeys.');
+  if (!passkeys || !passkeys.length) throw new Error('No passkeys are registered.');
+  if (!recoveryPubB64) throw new Error('Missing recovery public key.');
+
+  const authOptRes = await fetch('/api/webauthn/auth/options', { method: 'POST' });
+  if (!authOptRes.ok) throw new Error((await authOptRes.json()).error || 'Could not load passkey options');
+  const authOpts = await authOptRes.json();
+
+  const { prfOutput, usedCredId, assertionPayload } = await doGetPRF(
+    authOpts, passkeys, { evalByCredential: true }
+  );
+  await verifyAssertion(authOpts.flowId, assertionPayload);
+
+  const match = passkeys.find(p => p.cred_id === usedCredId);
+  if (!match) throw new Error('The passkey you used is not registered.');
+
+  const kek = await kekFromPRF(prfOutput);
+  prfOutput.fill(0);
+  const vaultPriv = unwrapWithKEK(b64ToBytes(match.wrapped_privkey), kek);
+  kek.fill(0);
+  if (!vaultPriv) throw new Error('Could not unwrap the vault key with that passkey.');
+
+  const wrapped = sealTo(vaultPriv, recoveryPubB64);
+  vaultPriv.fill(0);
+  return bytesToB64(wrapped);
+}
+
 // A keyProvider (salt => 32-byte key) that IGNORES the per-file salt and always
 // returns the fixed FEK. The NYX3 blob was encrypted directly with the FEK, so
 // every chunk/metadata call must return the same key regardless of salt.
@@ -408,6 +442,7 @@ function fekKeyProvider(fek) {
 window.NyxPasskey = {
   supported: passkeySupported,
   register: passkeyRegister,
+  wrapVaultKeyForRecovery,
   sealFEK,
   unsealFEK,
   fekKeyProvider,

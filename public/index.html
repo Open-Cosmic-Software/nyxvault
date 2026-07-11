@@ -136,6 +136,15 @@
           <span class="admin-note-alert" id="passkeySingleWarn" style="display:none;">⚠️ You currently have only <strong>one</strong> passkey — add a backup passkey now.</span>
         </div>
 
+        <div class="admin-note" id="recoveryNote" style="display:none;">
+          🦞 <strong>Agent recovery key:</strong> <span id="recoveryStatus">checking…</span>
+          <span class="admin-note-alert" id="recoveryWarn" style="display:none;">⚠️ A recovery key lets the server host (the agent) decrypt all <em>passkey-mode</em> files. Passphrase-mode files remain fully zero-knowledge.</span>
+          <div style="margin-top:8px;">
+            <button type="button" class="btn-ghost" id="addRecoveryBtn" style="display:none;">＋ Add recovery key</button>
+            <button type="button" class="btn-ghost" id="removeRecoveryBtn" style="display:none;">✕ Remove recovery key</button>
+          </div>
+        </div>
+
         <div id="passkeyListWrap" style="display:none;">
           <div class="table-scroll">
             <table class="passkey-table">
@@ -211,7 +220,7 @@
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
   <!-- App -->
-  <script src="/lib/passkey.js?v=232"></script>
-  <script src="/app.js?v=232"></script>
+  <script src="/lib/passkey.js?v=240"></script>
+  <script src="/app.js?v=240"></script>
 </body>
 </html>

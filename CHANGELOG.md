@@ -22,6 +22,41 @@ All notable changes to NyxVault are documented here.
 - **Passkey management UI:** register, rename and delete passkeys, with
   credential-ID chips, created/last-used timestamps and live count.
 
+### 🦞 Agent recovery key — CLI decryption for passkey-mode files
+
+- **New: an opt-in software recovery key lets the server host's agent (Nyx)
+  decrypt passkey-mode files from the command line** — no biometric
+  authenticator required. Until now, passkey-mode files could only be opened
+  in a browser with a registered passkey; the agent could upload (sealing to
+  the vault public key) but never decrypt.
+- **How it works:** the server generates an X25519 recovery keypair; the
+  private key is written to `data/recovery-key.json` (chmod 600, git-ignored,
+  never leaves the host). The browser then runs **one passkey ceremony**,
+  unwraps the vault private key locally and seals it to the recovery public
+  key (anonymous sealed box) — the vault private key never travels in
+  plaintext. The wrap is stored in a new `recovery_keys` table.
+- **Admin UI:** the Passkeys card gains an "Add recovery key" button with a
+  clear warning that this key allows the server operator to decrypt all
+  passkey-mode files, plus status display and one-click removal (revocation).
+- **CLI:** `node nyx-decrypt.js <blob> --recovery [output] [--token <hex>]`
+  opens the chain recovery key → vault private key → file key (FEK) → file.
+  Without `--token`, the right DB entry is identified automatically by the
+  blob's authenticated header HMAC. Auto-detects recovery mode when no
+  passphrase is given and a recovery key file exists.
+- **New endpoints (admin-only):** `GET /api/recovery`,
+  `POST /api/recovery/init`, `POST /api/recovery/finalize`,
+  `DELETE /api/recovery/:id`. Removing the last passkey also purges recovery
+  keys (they wrap a vault key that no longer exists).
+- **Scope of the trade-off (explicit + opt-in):** a finalized recovery key
+  reduces zero-knowledge **for passkey-mode files only**. Passphrase-mode
+  files remain fully zero-knowledge — the server still cannot decrypt them,
+  recovery key or not.
+- `NYXVAULT_DB`, `NYXVAULT_STORAGE` and `NYXVAULT_RECOVERY_KEY` environment
+  overrides so test instances can run against throwaway paths.
+- Verified end to end: recovery-decrypt of a passkey-mode upload on an
+  isolated test instance (byte-identical output), passphrase CLI round-trip
+  unchanged.
+
 ### 🛡️ Passkey-loss safety UX
 
 - **Persistent backup note** in the Passkeys admin card: passkeys are the ONLY
@@ -95,10 +130,6 @@ All notable changes to NyxVault are documented here.
 
 ### 💪 Upload size
 
-- Investigated the reported ~16 MB encryption limit: **no such limit exists in
-  NyxVault itself** (verified: 21 MB browser passkey E2E and 20 MB CLI
-  round-trips are byte-identical; a 1 GB API upload is on record). Chunked
-  NYX3 encryption (4 MB chunks) has no single-shot secretbox constraint.
 - The web UI now reads the server’s real `MAX_FILE_SIZE_MB` from
   `GET /api/settings` and rejects oversized files **before** encrypting, with a
   clear message (previously the failure surfaced only after upload).
