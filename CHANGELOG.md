@@ -2,6 +2,28 @@
 
 All notable changes to NyxVault are documented here.
 
+## [2.1.1] — 2026-07-11
+
+### 🔑 Passkey polish (post-first-test feedback)
+
+#### Fixed
+- **All user-facing strings are now English** (buttons, toasts, error messages,
+  status lines, HTML labels) — previously some passkey UI text was German.
+- **Reliable PRF-support detection.** `create()`'s
+  `clientExtensionResults.prf.enabled` is unreliable — many authenticators
+  (Windows Hello, some iCloud versions) don't report it even though PRF works
+  fine during `get()`. Registration no longer hard-fails on the `create()`
+  result: after saving the credential it runs a **real follow-up
+  `navigator.credentials.get()` with `prf.eval`** and only reports PRF as
+  unsupported if that probe genuinely produces no output. The user is told they
+  may be prompted twice (create + verify). When PRF is truly unavailable, the
+  English message suggests trying the latest Chrome/Edge or an iPhone/iPad passkey.
+- **Broader platform-authenticator compatibility:** registration now uses
+  `residentKey: 'preferred'` + `requireResidentKey: false` (was `'required'`),
+  which Windows Hello and some iCloud versions require.
+
+---
+
 ## [2.1.0] — 2026-07-11
 
 ### 🔑 Passkey Encryption (WebAuthn PRF)

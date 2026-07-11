@@ -761,7 +761,12 @@ app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
         transports: p.transports ? JSON.parse(p.transports) : undefined
       })),
       authenticatorSelection: {
-        residentKey: 'required',
+        // 'preferred' (not 'required') for broad compatibility with platform
+        // authenticators — Windows Hello and some iCloud versions reject
+        // required resident keys. Passkeys are still discoverable when the
+        // platform supports it.
+        residentKey: 'preferred',
+        requireResidentKey: false,
         userVerification: 'preferred'
       },
       extensions: { prf: {} }
@@ -875,7 +880,7 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
 
 // ── Health ────────────────────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'nyxvault', version: '2.1.0', uptime: process.uptime() });
+  res.json({ status: 'ok', service: 'nyxvault', version: '2.1.1', uptime: process.uptime() });
 });
 
 // ── Session cleanup (every 30min) ─────────────────────────

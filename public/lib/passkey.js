@@ -15,11 +15,16 @@
  * feeds the HKDF, every file gets a unique key even though the PRF secret is the
  * same. The blob format is IDENTICAL to the passphrase path — only the key
  * source differs — so all the existing NYX3 chunk/HMAC machinery is reused.
+ *
+ * PRF SUPPORT DETECTION: create()'s clientExtensionResults.prf.enabled is
+ * unreliable — many platform authenticators (Windows Hello, some iCloud
+ * versions) do NOT report it at registration even though PRF works fine during
+ * get(). So we never hard-fail on the create() result; instead we run a real
+ * follow-up get() with prf.eval and check whether an output is actually
+ * produced. That is the ground truth.
  */
 'use strict';
 
-// One global, non-secret domain-separation salt for the PRF evaluation.
-// (Fetched from /api/settings or /api/dl/:token/meta and passed in as base64.)
 function b64ToBytes(b64) {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
@@ -62,15 +67,19 @@ function passkeySupported() {
 }
 
 // ── Registration (admin) ──────────────────────────────────
-// Runs the create() ceremony. `sessionToken` authorizes the server endpoints.
+// Runs the create() ceremony, then does a REAL follow-up get() with prf.eval to
+// verify PRF actually works on this authenticator (create() results lie).
+// `sessionToken` authorizes the server endpoints.
+// Returns { ok, prf_enabled, cred_id_short } where prf_enabled reflects the
+// ground-truth follow-up test, not the create() extension result.
 async function passkeyRegister(sessionToken, label) {
-  if (!passkeySupported()) throw new Error('Dieser Browser unterstützt keine Passkeys.');
+  if (!passkeySupported()) throw new Error('This browser does not support passkeys.');
 
   const optRes = await fetch('/api/webauthn/register/options', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Session-Token': sessionToken }
   });
-  if (!optRes.ok) throw new Error((await optRes.json()).error || 'Konnte Optionen nicht laden');
+  if (!optRes.ok) throw new Error((await optRes.json()).error || 'Could not load registration options');
   const options = await optRes.json();
 
   // Convert server JSON (base64url) → ArrayBuffers for navigator.credentials.create
@@ -85,8 +94,13 @@ async function passkeyRegister(sessionToken, label) {
   // Request the PRF extension (empty eval at registration; we only need enablement)
   publicKey.extensions = Object.assign({}, options.extensions, { prf: {} });
 
-  const cred = await navigator.credentials.create({ publicKey });
-  if (!cred) throw new Error('Passkey-Erstellung abgebrochen');
+  let cred;
+  try {
+    cred = await navigator.credentials.create({ publicKey });
+  } catch (e) {
+    throw new Error('Passkey creation was cancelled or failed on this device.');
+  }
+  if (!cred) throw new Error('Passkey creation was cancelled.');
 
   const clientExt = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
   const att = cred.response;
@@ -108,20 +122,39 @@ async function passkeyRegister(sessionToken, label) {
     body: JSON.stringify({ credential: payload, label: label || 'Passkey' })
   });
   const verJson = await verRes.json();
-  if (!verRes.ok || !verJson.ok) throw new Error(verJson.error || 'Passkey-Registrierung fehlgeschlagen');
-  return verJson; // { ok, prf_enabled, cred_id_short }
+  if (!verRes.ok || !verJson.ok) throw new Error(verJson.error || 'Passkey registration failed');
+
+  // Ground-truth PRF check: try an actual PRF evaluation via get(). This is the
+  // only reliable way to know PRF works, since create() often under-reports.
+  let prfWorks = false;
+  try {
+    // Use a throwaway 32-byte salt just to probe PRF output presence.
+    const probeSalt = new Uint8Array(32).fill(0x2a);
+    const settingsRes = await fetch('/api/settings');
+    const settings = settingsRes.ok ? await settingsRes.json() : null;
+    const realSalt = settings && settings.prf_salt ? b64ToBytes(settings.prf_salt) : probeSalt;
+    const out = await passkeyGetPRF(settings && settings.prf_salt ? settings.prf_salt : null, realSalt);
+    prfWorks = !!(out && out.length === 32);
+  } catch (probeErr) {
+    // The probe failing (e.g. user dismissed the second prompt) does NOT mean
+    // PRF is unsupported — fall back to the create()-time hint from the server.
+    prfWorks = !!verJson.prf_enabled;
+  }
+
+  return { ok: true, prf_enabled: prfWorks, cred_id_short: verJson.cred_id_short };
 }
 
 // ── Key derivation via authentication ─────────────────────
 // Runs the get() ceremony with PRF eval = prf_salt, verifies with the server
 // (anti-replay counter bump), and returns the 32-byte PRF secret.
-// `blobSalt` (per-file) is then HKDF'd on top by the caller via passkeyDeriveKey.
-async function passkeyGetPRF(prfSaltB64) {
-  if (!passkeySupported()) throw new Error('Dieser Browser unterstützt keine Passkeys.');
-  const prfSalt = b64ToBytes(prfSaltB64);
+// Accepts either a base64 prf_salt string or (for internal probing) a raw
+// Uint8Array override.
+async function passkeyGetPRF(prfSaltB64, prfSaltBytesOverride) {
+  if (!passkeySupported()) throw new Error('This browser does not support passkeys.');
+  const prfSalt = prfSaltBytesOverride || b64ToBytes(prfSaltB64);
 
   const optRes = await fetch('/api/webauthn/auth/options', { method: 'POST' });
-  if (!optRes.ok) throw new Error((await optRes.json()).error || 'Konnte Passkey-Optionen nicht laden');
+  if (!optRes.ok) throw new Error((await optRes.json()).error || 'Could not load passkey options');
   const options = await optRes.json();
   const flowId = options.flowId;
 
@@ -139,18 +172,18 @@ async function passkeyGetPRF(prfSaltB64) {
   try {
     assertion = await navigator.credentials.get({ publicKey });
   } catch (e) {
-    throw new Error('Kein passender Passkey auf diesem Gerät gefunden oder Vorgang abgebrochen.');
+    throw new Error('No matching passkey found on this device, or the request was cancelled.');
   }
-  if (!assertion) throw new Error('Passkey-Authentifizierung abgebrochen');
+  if (!assertion) throw new Error('Passkey authentication was cancelled.');
 
   const ext = assertion.getClientExtensionResults ? assertion.getClientExtensionResults() : {};
   if (!ext.prf || !ext.prf.results || !ext.prf.results.first) {
-    throw new Error('Dieser Passkey unterstützt die PRF-Erweiterung nicht — auf einem kompatiblen Gerät/Browser erneut versuchen.');
+    throw new Error('This passkey does not support the PRF extension. Try the latest Chrome or Edge, or an iPhone/iPad passkey.');
   }
   const prfOutput = new Uint8Array(ext.prf.results.first); // 32 bytes
 
-  // Verify assertion with the server (counter bump). Non-fatal for key
-  // derivation, but we surface a clear error if the passkey is unknown.
+  // Verify assertion with the server (counter bump). We deliberately do NOT
+  // send the PRF output to the server — it must never leave the browser.
   const resp = assertion.response;
   const payload = {
     flowId,
@@ -174,7 +207,7 @@ async function passkeyGetPRF(prfSaltB64) {
   });
   if (!verRes.ok) {
     const j = await verRes.json().catch(() => ({}));
-    throw new Error(j.error || 'Passkey-Verifizierung fehlgeschlagen');
+    throw new Error(j.error || 'Passkey verification failed');
   }
 
   return prfOutput;

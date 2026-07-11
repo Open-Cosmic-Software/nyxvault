@@ -63,19 +63,19 @@
           <div style="display:flex; align-items:center; gap:10px;">
             <span style="font-size:1.3rem;">🔑</span>
             <div>
-              <strong>Passkey-Verschlüsselung</strong>
-              <div id="passkeyStatus" style="font-size:0.82rem; opacity:0.8;">Lade…</div>
+              <strong>Passkey Encryption</strong>
+              <div id="passkeyStatus" style="font-size:0.82rem; opacity:0.8;">Loading…</div>
             </div>
           </div>
           <div style="display:flex; align-items:center; gap:14px;">
-            <button type="button" class="btn-cancel" id="registerPasskeyBtn">🔑 Passkey registrieren</button>
+            <button type="button" class="btn-cancel" id="registerPasskeyBtn">🔑 Register Passkey</button>
             <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
               <input type="checkbox" id="passkeyModeToggle">
-              <span>Passkey-Modus</span>
+              <span>Passkey mode</span>
             </label>
           </div>
         </div>
-        <p id="passkeyUnsupported" style="display:none; color:#ffb4b4; font-size:0.82rem; margin-top:8px;">⚠️ Dieser Browser unterstützt keine Passkeys / WebAuthn.</p>
+        <p id="passkeyUnsupported" style="display:none; color:#ffb4b4; font-size:0.82rem; margin-top:8px;">⚠️ This browser does not support passkeys / WebAuthn.</p>
       </div>
 
       <!-- Drop Zone -->
@@ -112,7 +112,7 @@
           <input type="password" id="uploadPassphrase" placeholder="Encryption passphrase (required)" autocomplete="off" required>
           <button type="button" class="btn-icon" id="toggleUploadPw" title="Show/hide">👁️</button>
         </div>
-        <p id="passkeyUploadNote" style="display:none; font-size:0.85rem; opacity:0.85; margin:6px 0;">🔑 Passkey-Modus aktiv — beim Hochladen wirst du nach deinem Passkey gefragt. Keine Passphrase nötig.</p>
+        <p id="passkeyUploadNote" style="display:none; font-size:0.85rem; opacity:0.85; margin:6px 0;">🔑 Passkey mode active — you'll be asked for your passkey when uploading. No passphrase needed.</p>
         <div class="upload-actions">
           <button class="btn-upload" id="uploadBtn"><img src="/assets/icon-unlock-128.png" alt="" class="nyx-ic-btn">Encrypt & Upload</button>
           <button class="btn-cancel" id="cancelBtn">Cancel</button>
@@ -174,7 +174,7 @@
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
   <!-- App -->
-  <script src="/lib/passkey.js?v=210"></script>
-  <script src="/app.js?v=210"></script>
+  <script src="/lib/passkey.js?v=211"></script>
+  <script src="/app.js?v=211"></script>
 </body>
 </html>

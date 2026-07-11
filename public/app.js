@@ -401,9 +401,9 @@ function renderPasskeyUI() {
   }
   if (status) {
     status.textContent = passkeyRegistered
-      ? (passkeyMode ? '🔑 Passkey-Modus AKTIV — Uploads werden mit Passkey verschlüsselt'
-                     : 'Passkey registriert · Modus aus (Passphrase-Verschlüsselung)')
-      : 'Kein Passkey registriert';
+      ? (passkeyMode ? '🔑 Passkey mode ACTIVE — uploads are encrypted with your passkey'
+                     : 'Passkey registered · mode off (passphrase encryption)')
+      : 'No passkey registered';
   }
   if (supportWarn) supportWarn.style.display = supported ? 'none' : 'block';
 
@@ -421,24 +421,28 @@ function renderPasskeyUI() {
 async function registerPasskey() {
   const btn = document.getElementById('registerPasskeyBtn');
   if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
-    toast('Passkeys werden von diesem Browser nicht unterstützt', 'error');
+    toast('Passkeys are not supported by this browser', 'error');
     return;
   }
-  if (btn) { btn.disabled = true; btn.textContent = 'Warte auf Passkey…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Waiting for passkey…'; }
+  // The registration runs TWO prompts: first to create the passkey, then a
+  // quick second one to actually test PRF support (create() results are
+  // unreliable across authenticators). Tell the user so it isn't confusing.
+  toast('You may be prompted twice: once to create the passkey, once to verify encryption support.', 'info');
   try {
     const label = navigator.platform || 'Passkey';
     const res = await window.NyxPasskey.register(sessionToken, label);
     if (!res.prf_enabled) {
-      toast('⚠️ Passkey registriert, aber PRF wird NICHT unterstützt — Verschlüsselung geht auf diesem Gerät nicht. Anderes Gerät/Browser nutzen.', 'error');
+      toast('⚠️ Passkey saved, but the PRF extension is not available on this device — encryption won\'t work here. Try the latest Chrome or Edge, or use an iPhone/iPad passkey.', 'error');
     } else {
-      toast('Passkey registriert! 🔑', 'success');
+      toast('Passkey registered! 🔑', 'success');
     }
     passkeyRegistered = true;
     await loadPasskeySettings();
   } catch (err) {
-    toast('Passkey-Registrierung fehlgeschlagen: ' + err.message, 'error');
+    toast('Passkey registration failed: ' + err.message, 'error');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '🔑 Passkey registrieren'; }
+    if (btn) { btn.disabled = false; btn.textContent = '🔑 Register Passkey'; }
   }
 }
 
@@ -454,9 +458,9 @@ async function togglePasskeyMode(on) {
     passkeyMode = data.passkey_mode === 'on';
     passkeyRegistered = !!data.passkey_registered;
     renderPasskeyUI();
-    toast(passkeyMode ? 'Passkey-Modus aktiviert 🔑' : 'Passkey-Modus deaktiviert', 'success');
+    toast(passkeyMode ? 'Passkey mode enabled 🔑' : 'Passkey mode disabled', 'success');
   } catch (err) {
-    toast('Konnte Einstellung nicht speichern: ' + err.message, 'error');
+    toast('Could not save setting: ' + err.message, 'error');
     await loadPasskeySettings();
   }
 }
@@ -681,7 +685,7 @@ async function uploadFile() {
   let keyProvider = null;
   if (passkeyMode) {
     if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
-      toast('Passkeys werden von diesem Browser nicht unterstützt', 'error');
+      toast('Passkeys are not supported by this browser', 'error');
       return;
     }
   } else if (!uploadPw) {
@@ -700,7 +704,7 @@ async function uploadFile() {
     if (passkeyMode) {
       // Fetch the global PRF salt, run the ceremony once, and build a key provider.
       const settings = await (await fetch('/api/settings')).json();
-      if (!settings.prf_salt) throw new Error('Server hat keinen PRF-Salt konfiguriert');
+      if (!settings.prf_salt) throw new Error('Server has no PRF salt configured');
       const prfOutput = await window.NyxPasskey.getPRF(settings.prf_salt);
       keyProvider = (salt) => window.NyxPasskey.deriveKey(prfOutput, salt);
     }

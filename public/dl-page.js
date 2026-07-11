@@ -191,7 +191,7 @@
       const pb = $('passkeyDecryptWrap'); if (pb) pb.style.display = 'block';
       if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
         const pn = $('passkeyNote');
-        if (pn) { pn.textContent = '⚠️ Dieser Browser unterstützt keine Passkeys. Öffne den Link in einem Browser/Gerät mit Passkey-Unterstützung.'; pn.style.color = '#ffb4b4'; }
+        if (pn) { pn.textContent = '⚠️ This browser does not support passkeys. Open this link in a browser/device with passkey support (latest Chrome/Edge, or an iPhone/iPad).'; pn.style.color = '#ffb4b4'; }
         const btn = $('passkeyDecryptBtn'); if (btn) btn.disabled = true;
       }
     } else {
@@ -271,27 +271,27 @@
   if (passkeyDecryptBtn) {
     passkeyDecryptBtn.addEventListener('click', async () => {
       if (!window.NyxPasskey || !window.NyxPasskey.supported()) {
-        $('dlError').textContent = 'Dieser Browser unterstützt keine Passkeys.';
+        $('dlError').textContent = 'This browser does not support passkeys.';
         $('dlError').style.display = 'block';
         return;
       }
       const prfSalt = fileMeta && fileMeta.prf_salt;
       if (!prfSalt) {
-        $('dlError').textContent = 'Für diese Datei fehlt der Passkey-Salt (Server-Konfiguration).';
+        $('dlError').textContent = 'This file is missing its passkey salt (server configuration).';
         $('dlError').style.display = 'block';
         return;
       }
       passkeyDecryptBtn.disabled = true;
       const origText = passkeyDecryptBtn.textContent;
-      passkeyDecryptBtn.textContent = 'Warte auf Passkey…';
+      passkeyDecryptBtn.textContent = 'Waiting for passkey…';
       try {
         const prfOutput = await window.NyxPasskey.getPRF(prfSalt);
         const keyProvider = (salt) => window.NyxPasskey.deriveKey(prfOutput, salt);
         await runDecrypt(null, keyProvider);
       } catch (err) {
-        $('dlError').textContent = err.message || 'Passkey-Entschlüsselung fehlgeschlagen';
+        $('dlError').textContent = err.message || 'Passkey decryption failed';
         $('dlError').style.display = 'block';
-        toast('Passkey fehlgeschlagen', 'error');
+        toast('Passkey failed', 'error');
       } finally {
         passkeyDecryptBtn.disabled = false;
         passkeyDecryptBtn.textContent = origText;
