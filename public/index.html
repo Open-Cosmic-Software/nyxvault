@@ -34,6 +34,9 @@
         <div class="input-group">
           <input type="password" id="loginPassphrase" placeholder="Encryption Passphrase (for E2E crypto)" autocomplete="off" required>
         </div>
+        <div class="input-group" id="login2faGroup" style="display:none;">
+          <input type="text" id="login2faCode" placeholder="6-digit 2FA code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" pattern="[0-9]*">
+        </div>
         <button type="submit" class="btn-primary" id="loginBtn">Unlock Vault</button>
         <div class="error-text" id="loginError"></div>
       </form>
@@ -162,6 +165,47 @@
         </div>
       </section>
 
+      <!-- Two-factor auth card -->
+      <section class="admin-card" id="twofaSettings">
+        <div class="admin-card-head">
+          <div class="admin-card-title">
+            <span class="admin-card-icon">🔐</span>
+            <div>
+              <h2>Two-factor authentication</h2>
+              <p class="admin-card-sub" id="twofaStatus">Loading…</p>
+            </div>
+          </div>
+          <button type="button" class="btn-ghost" id="twofaToggleBtn">Enable 2FA</button>
+        </div>
+        <div class="admin-note">
+          🛡️ Adds a time-based one-time code (Google Authenticator, Authy, 1Password, …) on top of the admin password. When enabled it is required for the admin login <strong>and</strong> for device calibration.
+        </div>
+
+        <!-- Setup panel (hidden until “Enable 2FA”) -->
+        <div id="twofaSetup" style="display:none;margin-top:14px;">
+          <p class="admin-card-sub">1. Scan this QR code with your authenticator app (or enter the secret manually):</p>
+          <div id="twofaQr" style="margin:12px 0;"></div>
+          <p class="admin-card-sub" style="word-break:break-all;">Secret: <code id="twofaSecret"></code></p>
+          <p class="admin-card-sub" style="margin-top:12px;">2. Enter the current 6-digit code to confirm:</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <input type="text" id="twofaEnableCode" placeholder="123456" inputmode="numeric" maxlength="6" pattern="[0-9]*" style="flex:1;min-width:140px;padding:10px 12px;border-radius:8px;border:1px solid #3a3a5a;background:#12121f;color:#e8e8f8;">
+            <button type="button" class="btn-primary" id="twofaConfirmBtn">Confirm &amp; enable</button>
+            <button type="button" class="btn-ghost" id="twofaCancelBtn">Cancel</button>
+          </div>
+          <div class="error-text" id="twofaSetupError" style="display:none;margin-top:8px;"></div>
+        </div>
+
+        <!-- Disable panel (hidden until enabled) -->
+        <div id="twofaDisable" style="display:none;margin-top:14px;">
+          <p class="admin-card-sub">Enter a current 2FA code to turn it off:</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <input type="text" id="twofaDisableCode" placeholder="123456" inputmode="numeric" maxlength="6" pattern="[0-9]*" style="flex:1;min-width:140px;padding:10px 12px;border-radius:8px;border:1px solid #3a3a5a;background:#12121f;color:#e8e8f8;">
+            <button type="button" class="btn-ghost" id="twofaDisableBtn">Disable 2FA</button>
+          </div>
+          <div class="error-text" id="twofaDisableError" style="display:none;margin-top:8px;"></div>
+        </div>
+      </section>
+
       <!-- Files card -->
       <section class="admin-card">
         <div class="admin-card-head">
@@ -219,8 +263,9 @@
   <script src="/lib/nacl-fast.min.js"></script>
   <script src="/lib/nacl-util.min.js"></script>
   <script src="/lib/argon2.umd.min.js"></script>
+  <script src="/lib/qrcode.min.js"></script>
   <!-- App -->
-  <script src="/lib/passkey.js?v=240"></script>
-  <script src="/app.js?v=240"></script>
+  <script src="/lib/passkey.js?v=241"></script>
+  <script src="/app.js?v=241"></script>
 </body>
 </html>

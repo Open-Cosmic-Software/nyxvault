@@ -330,10 +330,13 @@
       '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">' +
       '<input id="calibPw" type="password" placeholder="Admin password" ' +
       'style="flex:1;min-width:180px;padding:8px 10px;border-radius:8px;border:1px solid #3a3a5a;background:#12121f;color:#e8e8f8">' +
+      '<input id="calib2fa" type="text" inputmode="numeric" maxlength="6" placeholder="2FA code" ' +
+      'style="display:none;flex:1;min-width:120px;padding:8px 10px;border-radius:8px;border:1px solid #3a3a5a;background:#12121f;color:#e8e8f8">' +
       '<button id="calibGo" style="padding:8px 14px;border-radius:8px;border:0;background:#2ec5c5;color:#04121a;font-weight:600;cursor:pointer">Calibrate</button>' +
       '</div>';
     const go = $('calibGo');
     const pw = $('calibPw');
+    const tf = $('calib2fa');
     if (!go || !pw) return;
     pw.focus();
     const run = async () => {
@@ -341,13 +344,19 @@
       if (!password) { pw.focus(); return; }
       go.disabled = true; go.textContent = 'Calibrating…';
       try {
+        const body = { password };
+        const code = (tf && tf.value || '').replace(/\D/g, '');
+        if (code) body.totp_code = code;
         const loginRes = await fetch('/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password })
+          body: JSON.stringify(body)
         });
         const loginData = await loginRes.json().catch(() => ({}));
-        if (!loginRes.ok) throw new Error(loginData.error || 'Wrong admin password.');
+        if (!loginRes.ok) {
+          if (loginData.totp_required && tf) { tf.style.display = ''; tf.focus(); go.disabled = false; go.textContent = 'Calibrate'; }
+          throw new Error(loginData.error || 'Wrong admin password.');
+        }
         const sessTok = loginRes.headers.get('X-Session-Token') || loginData.token || loginData.session_token;
         if (!sessTok) throw new Error('No admin session token returned.');
         await window.NyxPasskey.bootstrapViaRecovery(passkeys, sessTok, 'platform');

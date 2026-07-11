@@ -180,6 +180,58 @@ function setSetting(key, value) { stmtSetSetting.run(key, String(value)); }
 
 if (!getSetting('passkey_mode')) setSetting('passkey_mode', 'off');
 
+// ── TOTP (RFC 6238) two-factor auth ───────────────────────────────────────────
+// Optional second factor for the admin password. Implemented with Node crypto
+// (HMAC-SHA1) so it needs no extra dependency. Secret is base32, stored in
+// settings only while 2FA is enabled. Verifying accepts a ±1 step window to
+// tolerate clock skew, matching every standard authenticator app.
+const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(buf) {
+  let bits = 0, value = 0, out = '';
+  for (const byte of buf) {
+    value = (value << 8) | byte; bits += 8;
+    while (bits >= 5) { out += B32_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+function base32Decode(str) {
+  const clean = String(str).toUpperCase().replace(/[^A-Z2-7]/g, '');
+  let bits = 0, value = 0; const out = [];
+  for (const ch of clean) {
+    const idx = B32_ALPHABET.indexOf(ch);
+    if (idx < 0) continue;
+    value = (value << 5) | idx; bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+  }
+  return Buffer.from(out);
+}
+function totpCode(secretB32, forStep) {
+  const key = base32Decode(secretB32);
+  const step = (forStep === undefined) ? Math.floor(Date.now() / 1000 / 30) : forStep;
+  const msg = Buffer.alloc(8);
+  msg.writeUInt32BE(Math.floor(step / 0x100000000), 0);
+  msg.writeUInt32BE(step >>> 0, 4);
+  const hmac = crypto.createHmac('sha1', key).update(msg).digest();
+  const offset = hmac[hmac.length - 1] & 0x0f;
+  const bin = ((hmac[offset] & 0x7f) << 24) | (hmac[offset + 1] << 16) |
+              (hmac[offset + 2] << 8) | hmac[offset + 3];
+  return String(bin % 1000000).padStart(6, '0');
+}
+function totpVerify(secretB32, code) {
+  if (!secretB32 || !code) return false;
+  const clean = String(code).replace(/\D/g, '');
+  if (clean.length !== 6) return false;
+  const step = Math.floor(Date.now() / 1000 / 30);
+  for (let w = -1; w <= 1; w++) {
+    // Constant-time-ish compare per candidate window.
+    const cand = totpCode(secretB32, step + w);
+    if (crypto.timingSafeEqual(Buffer.from(cand), Buffer.from(clean))) return true;
+  }
+  return false;
+}
+function totpEnabled() { return getSetting('totp_enabled') === 'on' && !!getSetting('totp_secret'); }
+
 // ── Passkeys table (WebAuthn credentials + envelope key wrapping) ───────
 // v2.2.0 architecture (envelope encryption):
 //   • A single vault X25519 keypair is created client-side when the FIRST
@@ -487,6 +539,18 @@ app.post('/auth/login', loginLimiter, async (req, res) => {
     }
     if (!valid) {
       return res.status(401).json({ error: 'Wrong password' });
+    }
+    // Second factor (optional, admin-configurable). When enabled, the password
+    // alone is not sufficient — a valid TOTP code is also required. This same
+    // gate protects device calibration, since that flow logs in first.
+    if (totpEnabled()) {
+      const { totp_code } = req.body || {};
+      if (!totp_code) {
+        return res.status(401).json({ error: 'Two-factor code required', totp_required: true });
+      }
+      if (!totpVerify(getSetting('totp_secret'), totp_code)) {
+        return res.status(401).json({ error: 'Wrong two-factor code', totp_required: true });
+      }
     }
     const token = generateSessionToken();
     sessions.set(token, {
@@ -883,6 +947,66 @@ app.post('/api/settings', authWeb, (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── Two-factor auth (TOTP) admin config ────────────────────────────────────
+// Optional second factor for the admin login (and, transitively, device
+// calibration). Public status flag lets the login form show the code field.
+// Setup → enable requires proving one valid code so a mistyped secret can’t
+// lock you out. Disable requires a valid current code.
+app.get('/api/2fa/status', (req, res) => {
+  return res.json({ enabled: totpEnabled() });
+});
+
+// Begin setup: generate a fresh secret + otpauth URL (NOT yet enabled). Admin.
+app.post('/api/2fa/setup', authWeb, (req, res) => {
+  try {
+    if (totpEnabled()) return res.status(409).json({ error: 'Two-factor is already enabled. Disable it first to re-provision.' });
+    const secret = base32Encode(crypto.randomBytes(20)); // 160-bit
+    // Store as a PENDING secret; only /enable promotes it to active.
+    setSetting('totp_pending_secret', secret);
+    const label = encodeURIComponent('NyxVault admin');
+    const issuer = encodeURIComponent('NyxVault');
+    const otpauth = `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
+    return res.json({ secret, otpauth });
+  } catch (err) {
+    return res.status(500).json({ error: 'Could not start 2FA setup' });
+  }
+});
+
+// Confirm + enable: verify one code against the pending secret, then activate.
+app.post('/api/2fa/enable', authWeb, (req, res) => {
+  try {
+    const { code } = req.body || {};
+    const pending = getSetting('totp_pending_secret');
+    if (!pending) return res.status(400).json({ error: 'Start setup first.' });
+    if (!totpVerify(pending, code)) return res.status(400).json({ error: 'That code is not valid — check your authenticator and try again.' });
+    setSetting('totp_secret', pending);
+    setSetting('totp_enabled', 'on');
+    stmtSetSetting.run('totp_pending_secret', '');
+    console.log('[2FA] enabled');
+    return res.json({ ok: true, enabled: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Could not enable 2FA' });
+  }
+});
+
+// Disable: requires a valid current code (defence-in-depth even behind admin).
+app.post('/api/2fa/disable', authWeb, (req, res) => {
+  try {
+    if (!totpEnabled()) return res.json({ ok: true, enabled: false });
+    const { code } = req.body || {};
+    if (!totpVerify(getSetting('totp_secret'), code)) {
+      return res.status(400).json({ error: 'Enter a valid current 2FA code to disable it.' });
+    }
+    setSetting('totp_enabled', 'off');
+    stmtSetSetting.run('totp_secret', '');
+    stmtSetSetting.run('totp_pending_secret', '');
+    console.log('[2FA] disabled');
+    return res.json({ ok: true, enabled: false });
+  } catch (err) {
+    return res.status(500).json({ error: 'Could not disable 2FA' });
   }
 });
 

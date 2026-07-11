@@ -461,6 +461,7 @@ function showApp() {
   appContent.style.display = 'block';
   loadFiles();
   loadPasskeySettings();
+  loadTwofaSettings();
 }
 
 // ── Passkey settings + admin UI ───────────────────────────
@@ -751,14 +752,25 @@ async function login() {
   loginError.style.display = 'none';
 
   try {
+    const totpCode = (document.getElementById('login2faCode')?.value || '').replace(/\D/g, '');
+    const body = { password };
+    if (totpCode) body.totp_code = totpCode;
     const res = await fetch('/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password })
+      body: JSON.stringify(body)
     });
 
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Login failed');
+    if (!res.ok) {
+      // Reveal the 2FA field when the server asks for a second factor.
+      if (data.totp_required) {
+        const g = document.getElementById('login2faGroup');
+        if (g) g.style.display = '';
+        document.getElementById('login2faCode')?.focus();
+      }
+      throw new Error(data.error || 'Login failed');
+    }
 
     sessionToken = data.token;
     vaultPassphrase = passphrase;
@@ -1273,3 +1285,99 @@ if (sessionToken && vaultPassphrase) {
 } else {
   showLogin();
 }
+
+// ── Two-factor authentication (admin) ─────────────────────
+async function loadTwofaSettings() {
+  const statusEl = document.getElementById('twofaStatus');
+  const toggleBtn = document.getElementById('twofaToggleBtn');
+  const setupPanel = document.getElementById('twofaSetup');
+  const disablePanel = document.getElementById('twofaDisable');
+  if (!statusEl || !toggleBtn) return;
+  try {
+    const s = await (await fetch('/api/2fa/status')).json();
+    if (setupPanel) setupPanel.style.display = 'none';
+    if (disablePanel) disablePanel.style.display = 'none';
+    if (s.enabled) {
+      statusEl.textContent = '✅ Enabled — a 2FA code is required to log in.';
+      toggleBtn.textContent = 'Disable 2FA';
+      toggleBtn.onclick = () => { disablePanel.style.display = 'block'; document.getElementById('twofaDisableCode')?.focus(); };
+    } else {
+      statusEl.textContent = 'Off — password only.';
+      toggleBtn.textContent = 'Enable 2FA';
+      toggleBtn.onclick = startTwofaSetup;
+    }
+  } catch { statusEl.textContent = 'Could not load 2FA status.'; }
+}
+
+async function startTwofaSetup() {
+  const setupPanel = document.getElementById('twofaSetup');
+  const errEl = document.getElementById('twofaSetupError');
+  if (errEl) errEl.style.display = 'none';
+  try {
+    const res = await fetch('/api/2fa/setup', { method: 'POST', headers: { 'X-Session-Token': sessionToken } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not start setup');
+    document.getElementById('twofaSecret').textContent = data.secret;
+    // Render the otpauth URL as a QR code (same lib the download page uses).
+    const qrWrap = document.getElementById('twofaQr');
+    if (qrWrap) {
+      qrWrap.innerHTML = '';
+      try {
+        const qr = qrcode(0, 'M');
+        qr.addData(data.otpauth);
+        qr.make();
+        qrWrap.innerHTML = qr.createImgTag(5, 8);
+      } catch { qrWrap.textContent = data.otpauth; }
+    }
+    setupPanel.style.display = 'block';
+    document.getElementById('twofaEnableCode')?.focus();
+  } catch (err) {
+    toast(err.message || '2FA setup failed', 'error');
+  }
+}
+
+async function confirmTwofaEnable() {
+  const code = (document.getElementById('twofaEnableCode')?.value || '').replace(/\D/g, '');
+  const errEl = document.getElementById('twofaSetupError');
+  if (errEl) errEl.style.display = 'none';
+  if (code.length !== 6) { if (errEl) { errEl.textContent = 'Enter the 6-digit code.'; errEl.style.display = 'block'; } return; }
+  try {
+    const res = await fetch('/api/2fa/enable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-Token': sessionToken },
+      body: JSON.stringify({ code })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not enable 2FA');
+    toast('Two-factor enabled 🔐', 'success');
+    loadTwofaSettings();
+  } catch (err) {
+    if (errEl) { errEl.textContent = err.message; errEl.style.display = 'block'; }
+  }
+}
+
+async function confirmTwofaDisable() {
+  const code = (document.getElementById('twofaDisableCode')?.value || '').replace(/\D/g, '');
+  const errEl = document.getElementById('twofaDisableError');
+  if (errEl) errEl.style.display = 'none';
+  if (code.length !== 6) { if (errEl) { errEl.textContent = 'Enter a current 6-digit code.'; errEl.style.display = 'block'; } return; }
+  try {
+    const res = await fetch('/api/2fa/disable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-Token': sessionToken },
+      body: JSON.stringify({ code })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not disable 2FA');
+    toast('Two-factor disabled', 'success');
+    loadTwofaSettings();
+  } catch (err) {
+    if (errEl) { errEl.textContent = err.message; errEl.style.display = 'block'; }
+  }
+}
+
+document.getElementById('twofaConfirmBtn')?.addEventListener('click', confirmTwofaEnable);
+document.getElementById('twofaCancelBtn')?.addEventListener('click', () => { const p = document.getElementById('twofaSetup'); if (p) p.style.display = 'none'; });
+document.getElementById('twofaDisableBtn')?.addEventListener('click', confirmTwofaDisable);
+document.getElementById('twofaEnableCode')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmTwofaEnable(); });
+document.getElementById('twofaDisableCode')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmTwofaDisable(); });
