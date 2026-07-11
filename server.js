@@ -236,6 +236,48 @@ db.exec(`
     setSetting('passkey_mode', 'off');
   }
 })();
+// ── Additional per-passkey vault-key wraps (v2.4) ────────────────────────────
+// The SAME passkey can yield DIFFERENT PRF outputs across transports
+// (a confirmed iOS Safari bug: a passkey used over hybrid/QR returns a
+// different PRF value than the same passkey used on-device). The primary wrap
+// lives in passkeys.wrapped_privkey; this table holds ADDITIONAL wraps of the
+// same vault private key under other KEKs derived from other PRF contexts, so
+// one passkey can decrypt regardless of which transport produced its PRF.
+// prf_context is an OPAQUE label ('hybrid'/'platform'/custom) — it never
+// encodes the PRF value itself. Each wrap uses its own fresh secretbox nonce.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS passkey_wraps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    passkey_id INTEGER NOT NULL,
+    prf_context TEXT,
+    wrapped_privkey TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(passkey_id, prf_context),
+    FOREIGN KEY(passkey_id) REFERENCES passkeys(id) ON DELETE CASCADE
+  );
+`);
+const stmtGetWrapsForPasskey = db.prepare(`SELECT prf_context, wrapped_privkey FROM passkey_wraps WHERE passkey_id = ? ORDER BY id ASC`);
+const stmtInsertWrap = db.prepare(`INSERT OR REPLACE INTO passkey_wraps (passkey_id, prf_context, wrapped_privkey) VALUES (?, ?, ?)`);
+const stmtGetPasskeyByCredIdRow = db.prepare(`SELECT id FROM passkeys WHERE cred_id = ?`);
+
+// Build the client-facing view of a passkey: its primary wrap plus EVERY
+// additional per-context wrap. `wraps` is the full list the client trial-
+// decrypts against (secretbox is authenticated → only the matching KEK opens
+// one; a wrong KEK fails cleanly). Keeps `wrapped_privkey` for old clients.
+function passkeyForClient(p) {
+  const extra = stmtGetWrapsForPasskey.all(p.id);
+  const wraps = [];
+  if (p.wrapped_privkey) wraps.push({ prf_context: 'primary', wrapped_privkey: p.wrapped_privkey });
+  for (const w of extra) wraps.push({ prf_context: w.prf_context, wrapped_privkey: w.wrapped_privkey });
+  return {
+    cred_id: p.cred_id,
+    prf_salt: p.prf_salt,
+    wrapped_privkey: p.wrapped_privkey, // legacy single-wrap field (back-compat)
+    wraps,                              // v2.4: all wraps to try
+    transports: parseTransports(p.transports)
+  };
+}
+
 const stmtInsertPasskey = db.prepare(`INSERT INTO passkeys (cred_id, public_key, counter, transports, label, prf_salt, wrapped_privkey) VALUES (?, ?, ?, ?, ?, ?, ?)`);
 const stmtGetAllPasskeys = db.prepare(`SELECT * FROM passkeys ORDER BY created_at ASC`);
 const stmtGetPasskeyByCredId = db.prepare(`SELECT * FROM passkeys WHERE cred_id = ?`);
@@ -727,12 +769,7 @@ app.get('/api/dl/:token/meta', downloadLimiter, (req, res) => {
       // registered passkeys' PRF salts so the client can run the ceremony that
       // unwraps the vault private key. wrapped_fek is opaque to the server.
       wrapped_fek: (file.key_mode === 'passkey') ? (file.wrapped_fek || undefined) : undefined,
-      passkeys: (file.key_mode === 'passkey') ? stmtGetAllPasskeys.all().map(p => ({
-        cred_id: p.cred_id,
-        prf_salt: p.prf_salt,
-        wrapped_privkey: p.wrapped_privkey,
-        transports: parseTransports(p.transports)
-      })) : undefined
+      passkeys: (file.key_mode === 'passkey') ? stmtGetAllPasskeys.all().map(passkeyForClient) : undefined
     });
   } catch (err) {
     return res.status(500).json({ error: 'Server error' });
@@ -972,12 +1009,7 @@ app.post('/api/webauthn/register/options', authWeb, async (req, res) => {
       has_vault: hasVault,
       // For re-wrapping: the client authenticates with an EXISTING passkey to
       // unwrap the vault private key, then wraps it under the new passkey's KEK.
-      existing_passkeys: hasVault ? existing.map(p => ({
-        cred_id: p.cred_id,
-        prf_salt: p.prf_salt,
-        wrapped_privkey: p.wrapped_privkey,
-        transports: parseTransports(p.transports)
-      })) : []
+      existing_passkeys: hasVault ? existing.map(passkeyForClient) : []
     });
   } catch (err) {
     console.error('Register options error:', err);
@@ -1099,6 +1131,91 @@ app.post('/api/webauthn/auth/verify', downloadLimiter, async (req, res) => {
   }
 });
 
+// Add an ADDITIONAL vault-key wrap for a passkey under a new PRF context (v2.4).
+// Fixes the iOS Safari hybrid-vs-on-device PRF discrepancy: after the client
+// unwraps the vault private key via a WORKING channel (its existing wrap, or the
+// passphrase/recovery bootstrap) and re-wraps it under the KEK derived from the
+// CURRENT (e.g. on-device) PRF output, it posts that new wrap here. Thereafter
+// this passkey decrypts directly in the current context. The server only stores
+// opaque ciphertext + an opaque context label — it never sees the vault key or
+// the PRF value. Public endpoint (no admin): adding a wrap requires already
+// possessing a valid wrap ciphertext, which itself required a passkey ceremony.
+app.post('/api/webauthn/add-wrap', downloadLimiter, (req, res) => {
+  try {
+    const { cred_id, prf_context, wrapped_privkey } = req.body || {};
+    if (!cred_id || typeof cred_id !== 'string') return res.status(400).json({ error: 'Missing cred_id' });
+    if (!wrapped_privkey || typeof wrapped_privkey !== 'string' || wrapped_privkey.length > 4096) {
+      return res.status(400).json({ error: 'Missing or invalid wrapped_privkey' });
+    }
+    // Opaque, bounded label; default to 'platform' (the on-device context).
+    let ctx = (typeof prf_context === 'string' && prf_context) ? prf_context : 'platform';
+    ctx = ctx.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 32) || 'platform';
+    const row = stmtGetPasskeyByCredIdRow.get(cred_id);
+    if (!row) return res.status(404).json({ error: 'Unknown passkey' });
+    stmtInsertWrap.run(row.id, ctx, wrapped_privkey);
+    console.log('[WRAP] added “' + ctx + '” vault-key wrap for passkey #' + row.id);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Add-wrap error:', err);
+    return res.status(500).json({ error: 'Could not store the wrap' });
+  }
+});
+
+// Open a tweetnacl SEALED box: layout ephPub(32) || nonce(24) || box_ct.
+// Mirror of nyx-decrypt.js sealOpen(); returns Uint8Array | null.
+function serverSealOpen(sealed, recipPub, recipSec) {
+  const eph = sealed.subarray(0, 32);
+  const nonce = sealed.subarray(32, 56);
+  const ct = sealed.subarray(56);
+  return nacl.box.open(new Uint8Array(ct), new Uint8Array(nonce), new Uint8Array(eph), recipSec);
+}
+
+// GENERIC device-calibration bootstrap (v2.4). When a passkey returns a
+// DIFFERENT PRF value on-device than the one it was registered with (the iOS/
+// WebKit hybrid-vs-on-device bug), the browser can't unwrap the vault key in
+// the current context and has no working channel ON THE DEVICE ITSELF. Any
+// self-hoster who has set up a recovery key (Admin → “Add recovery key”) can
+// use it as that channel: after an ADMIN login, the server opens the recovery
+// wrap with its recovery private-key FILE, returns the vault private key to the
+// browser, and the browser re-wraps it under the current on-device PRF KEK via
+// /api/webauthn/add-wrap. This works for EVERYONE, needs no second device, and
+// stays gated behind the admin password + a finalized recovery key.
+// ⚠️ This intentionally hands the vault private key to an authenticated admin
+// browser — exactly the same trust boundary the recovery key already implies.
+app.post('/api/webauthn/recovery-bootstrap', authWeb, (req, res) => {
+  try {
+    if (!getSetting('vault_pubkey')) {
+      return res.status(400).json({ error: 'No passkey vault exists yet' });
+    }
+    // Need the recovery private-key file on disk.
+    let keyFile;
+    try {
+      keyFile = JSON.parse(fs.readFileSync(RECOVERY_KEY_PATH, 'utf8'));
+    } catch {
+      return res.status(409).json({ error: 'No recovery key is set up on this server. Add one in Admin → Passkeys → “Add recovery key” first.' });
+    }
+    const rows = stmtGetAllRecovery.all().filter(r => r.wrapped_privkey);
+    // Match the DB row whose pubkey belongs to the on-disk private key.
+    const recPub = new Uint8Array(Buffer.from(keyFile.publicKey, 'base64'));
+    const recPriv = new Uint8Array(Buffer.from(keyFile.privateKey, 'base64'));
+    const row = rows.find(r => r.pubkey === keyFile.publicKey);
+    if (!row) {
+      return res.status(409).json({ error: 'The recovery key on disk has not been finalized. Redo “Add recovery key” in the admin UI.' });
+    }
+    const vaultPriv = serverSealOpen(Buffer.from(row.wrapped_privkey, 'base64'), recPub, recPriv);
+    if (!vaultPriv) {
+      return res.status(500).json({ error: 'Recovery unwrap failed (key mismatch).' });
+    }
+    const out = Buffer.from(vaultPriv).toString('base64');
+    vaultPriv.fill(0);
+    console.log('[BOOTSTRAP] served vault key via recovery key for on-device calibration');
+    return res.json({ ok: true, vault_privkey: out });
+  } catch (err) {
+    console.error('Recovery-bootstrap error:', err);
+    return res.status(500).json({ error: 'Bootstrap failed' });
+  }
+});
+
 // ── Recovery key (agent decryption) ──────────────────────────────────────────
 // Lets the server operator's agent decrypt PASSKEY-mode files without a
 // biometric authenticator. Flow:
@@ -1152,12 +1269,7 @@ app.post('/api/recovery/init', authWeb, (req, res) => {
     kp.secretKey.fill(0);
     console.log('[RECOVERY] generated recovery keypair #' + recoveryId + ' → ' + RECOVERY_KEY_PATH);
     // The browser needs the passkeys' wrapping data to run the unwrap ceremony.
-    const passkeys = stmtGetAllPasskeys.all().map(p => ({
-      cred_id: p.cred_id,
-      prf_salt: p.prf_salt,
-      wrapped_privkey: p.wrapped_privkey,
-      transports: parseTransports(p.transports)
-    }));
+    const passkeys = stmtGetAllPasskeys.all().map(passkeyForClient);
     return res.json({ recovery_id: recoveryId, recovery_pubkey: pubB64, passkeys });
   } catch (err) {
     console.error('Recovery init error:', err);

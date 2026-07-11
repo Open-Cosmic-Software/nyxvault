@@ -384,9 +384,30 @@ async function unsealFEK(passkeys, wrappedFekB64) {
 
   const kek = await kekFromPRF(prfOutput);
   prfOutput.fill(0);
-  const vaultPriv = unwrapWithKEK(b64ToBytes(match.wrapped_privkey), kek);
+
+  // v2.4: a passkey may carry MULTIPLE wraps of the vault key (e.g. one from the
+  // hybrid/QR PRF value, one from the on-device PRF value — iOS Safari returns
+  // different PRF outputs per transport). Try every wrap with this KEK; secretbox
+  // is authenticated, so only the wrap matching THIS context opens — the rest
+  // fail cleanly. Fall back to the legacy single field for old servers.
+  const wrapList = (match.wraps && match.wraps.length)
+    ? match.wraps.map(w => w.wrapped_privkey)
+    : (match.wrapped_privkey ? [match.wrapped_privkey] : []);
+  let vaultPriv = null;
+  for (const w of wrapList) {
+    const attempt = unwrapWithKEK(b64ToBytes(w), kek);
+    if (attempt) { vaultPriv = attempt; break; }
+  }
   kek.fill(0);
-  if (!vaultPriv) throw new Error('Could not unwrap the vault key with that passkey.');
+  if (!vaultPriv) {
+    // This passkey verified, but none of its stored wraps match the PRF value
+    // this context produced. Signal the caller so it can offer to “enable this
+    // device” (bootstrap a new wrap via a working channel).
+    const err = new Error('This device produced a passkey value that none of the stored keys match yet. Enable this device (one-time) to decrypt directly here.');
+    err.code = 'NEEDS_DEVICE_WRAP';
+    err.credId = usedCredId;
+    throw err;
+  }
 
   // Recover the vault public key from the private key so we can open the box.
   const vaultPubForOpen = nacl.box.keyPair.fromSecretKey(vaultPriv).publicKey;
@@ -394,6 +415,66 @@ async function unsealFEK(passkeys, wrappedFekB64) {
   vaultPriv.fill(0);
   if (!fek) throw new Error('Could not decrypt the file key — the file may be corrupted.');
   return fek; // Uint8Array(32)
+}
+
+// ── Enable-this-device (v2.4) ─────────────────────────────
+// Bootstraps an on-device wrap for a passkey whose only stored wrap came from a
+// DIFFERENT PRF context (the iOS Safari hybrid-vs-on-device case). The vault
+// private key is obtained via a WORKING channel (a passphrase-derived vault key
+// the caller already recovered, OR any wrap that DOES open here), then re-wrapped
+// under the CURRENT on-device PRF KEK and posted to the server. Never sends the
+// vault key in the clear.
+//   vaultPriv: Uint8Array(32) — the vault private key, already recovered locally.
+//   passkeys, credIdHint: to run the on-device ceremony with the same passkey.
+async function enableThisDevice(passkeys, vaultPriv, prfContext) {
+  if (!vaultPriv || vaultPriv.length !== 32) throw new Error('Missing vault key for device enablement.');
+  const authOptRes = await fetch('/api/webauthn/auth/options', { method: 'POST' });
+  if (!authOptRes.ok) throw new Error((await authOptRes.json()).error || 'Could not load passkey options');
+  const authOpts = await authOptRes.json();
+  const { prfOutput, usedCredId, assertionPayload } = await doGetPRF(
+    authOpts, passkeys, { evalByCredential: true }
+  );
+  await verifyAssertion(authOpts.flowId, assertionPayload);
+  const kek = await kekFromPRF(prfOutput);
+  prfOutput.fill(0);
+  const wrapped = wrapWithKEK(vaultPriv, kek); // fresh random nonce inside
+  kek.fill(0);
+  const res = await fetch('/api/webauthn/add-wrap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cred_id: usedCredId,
+      prf_context: prfContext || 'platform',
+      wrapped_privkey: bytesToB64(wrapped)
+    })
+  });
+  if (!res.ok) throw new Error((await res.json()).error || 'Could not save the device key.');
+  return { ok: true, credId: usedCredId };
+}
+
+// ── Recovery-assisted device calibration (v2.4, GENERIC) ──────────────────
+// The fully generic fix for the iOS/WebKit hybrid-vs-on-device PRF bug that
+// works for ANY self-hoster on the device ITSELF (no second device needed).
+// Requires: (1) an admin session token, (2) a finalized recovery key on the
+// server. The server opens the recovery wrap with its recovery private-key
+// file and returns the vault private key to this authenticated admin browser;
+// we then re-wrap it under the CURRENT on-device PRF KEK. Thereafter the
+// passkey decrypts directly in this context, forever.
+//   adminToken: X-Session-Token from POST /auth/login.
+async function bootstrapViaRecovery(passkeys, adminToken, prfContext) {
+  if (!adminToken) throw new Error('Admin login is required to calibrate this device.');
+  const res = await fetch('/api/webauthn/recovery-bootstrap', {
+    method: 'POST',
+    headers: { 'X-Session-Token': adminToken }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Could not fetch the vault key from the recovery channel.');
+  const vaultPriv = b64ToBytes(data.vault_privkey);
+  try {
+    return await enableThisDevice(passkeys, vaultPriv, prfContext || 'platform');
+  } finally {
+    vaultPriv.fill(0);
+  }
 }
 
 // ── Recovery key setup: wrap the vault private key for a recovery pubkey ────
@@ -445,7 +526,10 @@ window.NyxPasskey = {
   wrapVaultKeyForRecovery,
   sealFEK,
   unsealFEK,
+  enableThisDevice,
+  bootstrapViaRecovery,
   fekKeyProvider,
   _b64ToBytes: b64ToBytes,
-  _bytesToB64: bytesToB64
+  _bytesToB64: bytesToB64,
+  _sealOpen: sealOpen
 };

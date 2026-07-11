@@ -297,14 +297,77 @@
         fek.fill(0);
         await runDecrypt(null, keyProvider);
       } catch (err) {
-        $('dlError').textContent = err.message || 'Passkey decryption failed';
-        $('dlError').style.display = 'block';
-        toast('Passkey failed', 'error');
+        if (err && err.code === 'NEEDS_DEVICE_WRAP') {
+          // The passkey works but returns a different PRF value on THIS device
+          // than the one it was registered with (an iOS/WebKit quirk). Offer the
+          // generic recovery-assisted calibration so it decrypts here from now on.
+          await offerDeviceCalibration(passkeys, wrappedFek);
+        } else {
+          $('dlError').textContent = err.message || 'Passkey decryption failed';
+          $('dlError').style.display = 'block';
+          toast('Passkey failed', 'error');
+        }
       } finally {
         passkeyDecryptBtn.disabled = false;
         passkeyDecryptBtn.textContent = origText;
       }
     });
+  }
+
+  // ── Device calibration (v2.4) ───────────────────────────────────────────
+  // Shown when a passkey returns a different on-device PRF value than at
+  // registration (iOS/WebKit hybrid-vs-on-device bug). Generic fix: with the
+  // admin password + a finalized recovery key, the server hands the vault key
+  // to this admin browser, which re-wraps it under the current on-device KEK.
+  // After that this passkey decrypts directly on this device — permanently.
+  async function offerDeviceCalibration(passkeys, wrappedFek) {
+    const errBox = $('dlError');
+    errBox.style.display = 'block';
+    errBox.innerHTML =
+      'This passkey works, but your device returns a different key here than ' +
+      'where it was set up (a known Apple/WebKit quirk). Enter the admin ' +
+      'password once to calibrate this device — afterwards it decrypts directly.' +
+      '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">' +
+      '<input id="calibPw" type="password" placeholder="Admin password" ' +
+      'style="flex:1;min-width:180px;padding:8px 10px;border-radius:8px;border:1px solid #3a3a5a;background:#12121f;color:#e8e8f8">' +
+      '<button id="calibGo" style="padding:8px 14px;border-radius:8px;border:0;background:#2ec5c5;color:#04121a;font-weight:600;cursor:pointer">Calibrate</button>' +
+      '</div>';
+    const go = $('calibGo');
+    const pw = $('calibPw');
+    if (!go || !pw) return;
+    pw.focus();
+    const run = async () => {
+      const password = pw.value;
+      if (!password) { pw.focus(); return; }
+      go.disabled = true; go.textContent = 'Calibrating…';
+      try {
+        const loginRes = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password })
+        });
+        const loginData = await loginRes.json().catch(() => ({}));
+        if (!loginRes.ok) throw new Error(loginData.error || 'Wrong admin password.');
+        const sessTok = loginRes.headers.get('X-Session-Token') || loginData.token || loginData.session_token;
+        if (!sessTok) throw new Error('No admin session token returned.');
+        await window.NyxPasskey.bootstrapViaRecovery(passkeys, sessTok, 'platform');
+        toast('Device calibrated — decrypting…', 'success');
+        // Retry the decrypt now that an on-device wrap exists.
+        errBox.style.display = 'none'; errBox.innerHTML = '';
+        const meta2 = await (await fetch('/api/dl/' + token + '/meta')).json().catch(() => null);
+        const pks = (meta2 && meta2.passkeys) || passkeys;
+        const fek = await window.NyxPasskey.unsealFEK(pks, wrappedFek);
+        const keyProvider = window.NyxPasskey.fekKeyProvider(fek);
+        fek.fill(0);
+        await runDecrypt(null, keyProvider);
+      } catch (e) {
+        errBox.style.display = 'block';
+        errBox.textContent = e.message || 'Calibration failed';
+        toast('Calibration failed', 'error');
+      }
+    };
+    go.addEventListener('click', run);
+    pw.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') run(); });
   }
 
   // Map file extensions to MIME types (fallback when content-type is octet-stream)

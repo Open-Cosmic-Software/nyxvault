@@ -212,6 +212,32 @@ Admin → Passkeys card → “Add recovery key”  (one passkey tap to authoris
 > files stay fully zero-knowledge** — the recovery key cannot touch them. Remove
 > the recovery key anytime in the admin UI to revoke agent access.
 
+### 📱 Device calibration (iOS/WebKit PRF quirk)
+
+Some Apple/WebKit versions return a **different WebAuthn PRF value for the same
+passkey** depending on how it's used — e.g. when a passkey registered via a
+cross-device QR flow (hybrid transport) is later used directly on the device
+itself. Because the vault key is wrapped under a KEK derived from the PRF output,
+a passkey that was set up in one context may fail to decrypt in the other, even
+though it's the *same* passkey.
+
+NyxVault handles this generically with **multi-wrap** — a single passkey can hold
+several wraps of the vault key under different PRF contexts, and the client
+trial-decrypts all of them. When a device hits the quirk and has no working wrap
+yet, the download page offers a one-time **“Calibrate this device”** step:
+
+1. Enter the **admin password** once (the calibration is admin-gated).
+2. If a finalised recovery key exists, the server unwraps the vault key with it
+   and returns it to the authenticated admin browser.
+3. The browser re-wraps the vault key under the **current on-device** PRF KEK and
+   stores it (`/api/webauthn/add-wrap`).
+
+Afterwards that passkey decrypts directly on that device — permanently, with no
+second device required. This reuses the exact trust boundary the recovery key
+already implies (admin + recovery-key file), so it needs a finalised recovery
+key to be available. Calibration stores only opaque ciphertext + an opaque
+context label; the server never sees the PRF value.
+
 ## 🔒 Security Model
 
 | Property | How |
